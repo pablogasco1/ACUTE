@@ -8,14 +8,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime
-from scipy.spatial.distance import pdist, squareform
 from scipy.spatial import ConvexHull
-from shapely.geometry import Point, Polygon
 from io import BytesIO
 import googlemaps
 import time
 import info_help
-from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon
+from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
 
 class FlightClusterApp:
     def __init__(self):
@@ -23,69 +21,37 @@ class FlightClusterApp:
         self.df_plot = None
         self.df = pd.DataFrame()
         self.grouped_df = pd.DataFrame()
+    
+    def cluster_dataframe(self):
+        # Group by 'cluster' and calculate the necessary statistics
+        cluster_df = self.df_alt_filter.groupby('cluster').agg({
+            'altitude': ['count', 'max', 'std', 'mean'],
+            'distance': ['max', 'std', 'mean'],
+            'model': ["nunique", lambda x: x.value_counts().idxmax()],
+            'ident': 'nunique',
+            'timestamp': lambda x: pd.to_datetime(x).dt.date.nunique()
+        })
         
-    def cluster_dataframe(self, df_alt_filter):
-        cluster_df = pd.DataFrame()
-        for i in range(df_alt_filter["cluster"].min(), df_alt_filter["cluster"].max() + 1):
-            df_i = df_alt_filter[df_alt_filter["cluster"]==i]
-            cluster_df.loc[i, "nº detection"] = df_i.shape[0]
-            cluster_df.loc[i, "max_altitude"] = round(df_i["altitude"].max(), 2)
-            cluster_df.loc[i, "std_altitude"] = round(df_i["altitude"].std(), 2)
-            cluster_df.loc[i, "mean_altitude"] = round(df_i["altitude"].mean(), 2)
-            cluster_df.loc[i, "max_distance"] = round(df_i["distance"].max(),2)
-            cluster_df.loc[i, "std_distance"] = round(df_i["distance"].std(),2)
-            cluster_df.loc[i, "mean_distance"] = round(df_i["distance"].mean(),2)
-            cluster_df.loc[i, "main model"] = df_i["model"].value_counts().idxmax()
-            cluster_df.loc[i, "nº model"] = len(df_i["model"].unique())
-            cluster_df.loc[i, "nº ID"] = len(df_i["ident"].unique())
-            cluster_df.loc[i, "nº days"] = pd.to_datetime(df_i['timestamp']).dt.date.nunique()
+        # Flatten the multi-level index created by groupby
+        cluster_df.columns = [' '.join(col).strip() for col in cluster_df.columns.values]
+        cluster_df.rename(columns={"altitude count" : "num detections",
+                           "model <lambda_0>" : "main model",
+                           "timestamp <lambda>" : "num days"}, inplace=True)
 
-        cluster_df["nº detection"] = cluster_df["nº detection"].astype("int")
-        cluster_df["nº ID"] = cluster_df["nº ID"].astype("int")
-        cluster_df["nº days"] = cluster_df["nº days"].astype("int")
-        cluster_df["nº model"] = cluster_df["nº model"].astype("int")
-        
+        # Round the values to 2 decimal places
+        for col in ['altitude max', 'altitude std', 'altitude mean', 
+                    'distance max', 'distance std', 'distance mean']:
+            cluster_df[col] = cluster_df[col].round(2)
+
+        # Convert the necessary columns to int
+        for col in ['num detections', 'ident nunique', 'num days']:
+            cluster_df[col] = cluster_df[col].astype(int)
+
         return cluster_df
-        
-    def merge_close_points(self, df_points_interest, R):
-        # Calculate the distance between each point and each centroid
-        centroids = df_points_interest[["latitude", "longitude"]].to_numpy()
-        # Calculate the pairwise distances between all centroids
-        distances_centroids = squareform(pdist(centroids))
 
-        # Initialize a list to hold the new centroids
-        new_centroids = []
-        
-        # Initialize a set to keep track of used centroids
-        used_centroids = set()
-
-        # For each centroid
-        for i in range(len(centroids)):
-            # Skip this centroid if it has already been used
-            if tuple(centroids[i]) in used_centroids:
-                continue
-
-            # Find the other centroids that are closer than R distance
-            close_centroids_indices = np.where(distances_centroids[i] <= R)[0]
-
-            # Mark these centroids as used
-            for index in close_centroids_indices:
-                used_centroids.add(tuple(centroids[index]))
-            
-            close_centroids = centroids[close_centroids_indices]
-            mean_centroid = close_centroids.mean(axis=0)
-
-            # Add the new centroid to the list
-            new_centroids.append(mean_centroid)
-
-        # Convert the list to a numpy array
-        centroids_arr = np.array(new_centroids)
-        
-        return centroids_arr
-
-    def get_points_of_interest(self, df_alt_filter):
-        lat_min, lat_max = df_alt_filter["latitude"].min(), df_alt_filter["latitude"].max()
-        lon_min, lon_max = df_alt_filter["longitude"].min(), df_alt_filter["longitude"].max()
+    def get_points_of_interest(self):
+        lat_min, lat_max = self.df_alt_filter["latitude"].min(), self.df_alt_filter["latitude"].max()
+        lon_min, lon_max = self.df_alt_filter["longitude"].min(), self.df_alt_filter["longitude"].max()
         polygon = Polygon([(lon_min, lat_min), (lon_min, lat_max), (lon_max, lat_max), (lon_max, lat_min)])
         
         df_points_reduced = pd.DataFrame()
@@ -111,15 +77,15 @@ class FlightClusterApp:
             for tag in self.tags_dict:
                 for elem in self.tags_dict[tag]:
                     cond_i = df_points_interest[tag] == elem
-                    df_temp = pd.DataFrame(self.merge_close_points(df_points_interest[cond_i], self.R), columns=["latitude", "longitude"])
+                    points_i = df_points_interest[cond_i][["latitude", "longitude"]].to_numpy()
+                    df_temp = pd.DataFrame(merge_close_points(points_i, self.R), columns=["latitude", "longitude"])
                     df_temp["class"] = tag
                     df_temp["type"] = elem
-                    #df_temp[tag] = elem
                     df_points_reduced = pd.concat([df_points_reduced, df_temp], ignore_index=True)
             
         elif self.api=="GOOGLE":
             
-            max_radius = df_alt_filter.apply(lambda row: haversine(polygon.centroid.y, polygon.centroid.x, row['latitude'], row['longitude']), axis=1).max()
+            max_radius = self.df_alt_filter.apply(lambda row: haversine(polygon.centroid.y, polygon.centroid.x, row['latitude'], row['longitude']), axis=1).max()
             gmaps = googlemaps.Client(key=self.api_key)
             place_result = gmaps.places_nearby(location=(polygon.centroid.y, polygon.centroid.x), radius=max_radius*1000, keyword='point of interest', language='en')
             time.sleep(2)
@@ -128,9 +94,7 @@ class FlightClusterApp:
             df_points_reduced['latitude'] = [i["geometry"]["location"]["lat"] for i in place_result_list]
             df_points_reduced['longitude'] = [i["geometry"]["location"]["lng"] for i in place_result_list]
             
-            for ind, i in enumerate(place_result_list):
-                print(i["name"])            
-                
+            for ind, i in enumerate(place_result_list):                 
                 class_i = "none"
                 type_i = "none"
                 try:
@@ -144,7 +108,6 @@ class FlightClusterApp:
                                 class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"].split("-")[1], which_result=1)[["class", "type"]].values[0]
                             except ox._errors.InsufficientResponseError:
                                 pass
-                print("class,type", class_i, type_i)
                 df_points_reduced.loc[ind, "class"] = class_i
                 df_points_reduced.loc[ind, "type"] = type_i 
                 if class_i not in self.tags_dict:
@@ -153,18 +116,13 @@ class FlightClusterApp:
         
         return df_points_reduced
         
-    def plot_point_of_interest(self, df):
-        
-        alt_filter = (df["altitude"] > self.altitude_limit)
-        df_alt_filter = df.loc[alt_filter].copy()
-        df_alt_filter.reset_index(drop=True, inplace=True)
-        
-        # 1st step is to merge the points of interest into 1 in case they are very close, which is done by giving a R value higher than 0
-        df_points_interest = self.get_points_of_interest(df_alt_filter)
-        centroids = df_points_interest[["latitude", "longitude"]].values
+    def plot_point_of_interest(self):        
+        # 1st step is to get the points of interest which are already merged in case they are very close, 
+        # which is done by giving a R value higher than 0 in the sliders
+        centroids = self.df_points_interest[["latitude", "longitude"]].values
 
         # 2nd step is to get remove those points who are very far (>X) from these centroids
-        points = df_alt_filter[["latitude", "longitude"]].to_numpy()
+        points = self.df_alt_filter[["latitude", "longitude"]].to_numpy()
         distances0 = cdist(points, centroids, "euclidean")
 
         # Find the index of the closest centroid for each point
@@ -175,7 +133,7 @@ class FlightClusterApp:
         dist_mask = min_distances <= self.X
         points = points[dist_mask]
         clusters0 = clusters0[dist_mask]
-        df_reduced = df_alt_filter[dist_mask].copy()
+        df_reduced = self.df_alt_filter[dist_mask].copy()
 
         # 3rd step is to check now which clusters have a big number of points close (>min_samples)
         # Count the number of points in each cluster
@@ -204,18 +162,18 @@ class FlightClusterApp:
         df_reduced["cluster"] = clusters
         
         if self.show_unclustered:
-            df_alt_filter = df_alt_filter.merge(df_reduced[["cluster"]], how='left', left_index=True, right_index=True)
-            df_alt_filter['cluster'] = df_alt_filter['cluster'].fillna(-1)
-            df_alt_filter["cluster"] = df_alt_filter["cluster"].astype(int)
+            self.df_alt_filter = self.df_alt_filter.merge(df_reduced[["cluster"]], how='left', left_index=True, right_index=True)
+            self.df_alt_filter['cluster'] = self.df_alt_filter['cluster'].fillna(-1)
+            self.df_alt_filter["cluster"] = self.df_alt_filter["cluster"].astype(int)
         else:
-            df_alt_filter = df_reduced
+            self.df_alt_filter = df_reduced
+            
+        # Keep just those POI that accomplish with the previous conditions
+        self.df_points_interest = self.df_points_interest.iloc[large_clusters]
 
-        self.show_graph_table(df_alt_filter, df_points_interest.iloc[large_clusters])
+        self.show_graph_table()
 
-    def plot_dbscan(self, df):  
-        alt_filter = (df["altitude"] > self.altitude_limit)
-        df_alt_filter = df.loc[alt_filter].copy()
-        df_points_interest = self.get_points_of_interest(df_alt_filter)
+    def plot_dbscan(self):  
         
         if self.algorithm=="DBSCAN":
             dbscan = DBSCAN(eps=self.eps, min_samples=self.min_samples)
@@ -225,21 +183,21 @@ class FlightClusterApp:
             dbscan = OPTICS(max_eps=self.eps, min_samples=self.min_samples)
             
         # Fit the model to the data
-        dbscan.fit(df_alt_filter[['latitude', 'longitude']])
-        df_alt_filter["cluster"] = dbscan.labels_
+        dbscan.fit(self.df_alt_filter[['latitude', 'longitude']])
+        self.df_alt_filter["cluster"] = dbscan.labels_
         if not self.show_unclustered:
-            df_alt_filter = df_alt_filter[df_alt_filter["cluster"] >= 0] # cluster -1 is those points with no cluster
-        #labels = np.delete(dbscan.labels_, np.where(dbscan.labels_ == -1))
+            # cluster -1 is those points with no cluster
+            self.df_alt_filter = self.df_alt_filter[self.df_alt_filter["cluster"] >= 0]
         
-        self.show_graph_table(df_alt_filter, df_points_interest)
+        self.show_graph_table()
 
-    def show_graph_table(self, df_alt_filter, df_points_interest):
+    def show_graph_table(self):
         # df_alt_filter is the dataframe for all the points with a cluster_id>0
         # df_points_interest is the dataframe that contains all the points of interest
 
         # Plot the drones points
-        df_no_cluster = df_alt_filter[df_alt_filter["cluster"] == -1]
-        df_cluster = df_alt_filter[df_alt_filter["cluster"] != -1]
+        df_no_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] == -1]
+        df_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] != -1]
         fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='cluster', size="altitude",
                                 color_continuous_scale=px.colors.diverging.Portland ,#px.colors.cyclical.HSV,
                                 zoom=10, height=1000, width=1500,
@@ -262,7 +220,6 @@ class FlightClusterApp:
         
         #Scatter points with no cluster
         if not df_no_cluster.empty:
-        #if True:
             fig.add_trace(go.Scattermapbox(
                 lat=df_no_cluster['latitude'],
                 lon=df_no_cluster['longitude'],
@@ -271,10 +228,10 @@ class FlightClusterApp:
                 name="",
             ))
         else:
-            distances = cdist(df_points_interest[["latitude", "longitude"]], centroids_df[["latitude", "longitude"]])
+            distances = cdist(self.df_points_interest[["latitude", "longitude"]], centroids_df[["latitude", "longitude"]])
             closest_centroid_distances = np.min(distances, axis=1)
             max_dist = 0.03
-            df_points_interest = df_points_interest[closest_centroid_distances < max_dist]
+            self.df_points_interest = self.df_points_interest[closest_centroid_distances < max_dist]
         
         # Plot 
         fig.add_trace(go.Scattermapbox(
@@ -288,8 +245,8 @@ class FlightClusterApp:
         
         #Scatter points of interest
         fig.add_trace(go.Scattermapbox(
-            lat=df_points_interest['latitude'],
-            lon=df_points_interest['longitude'],
+            lat=self.df_points_interest['latitude'],
+            lon=self.df_points_interest['longitude'],
             mode='markers',  # Include text labels
             marker=dict(size=10, color='white'),
             name="",
@@ -305,7 +262,7 @@ class FlightClusterApp:
         )
         
         # Compute convex hull for each cluster and plot
-        df_points_interest['cluster_id'] = -1  # Initialize cluster ID column
+        self.df_points_interest['cluster_id'] = -1  # Initialize cluster ID column
         
         for cluster_id, group_df in df_cluster.groupby('cluster'):
             points = group_df[['latitude', 'longitude']].values
@@ -319,7 +276,7 @@ class FlightClusterApp:
             centroid = np.mean(cluster_polygon, axis=0)
             scaled_polygon = scale_polygon(np.array(cluster_polygon), centroid, 1.1)  # Scale by 10%
             # Assign cluster ID to points of interest based on whether they are inside the cluster polygon
-            df_points_interest.loc[df_points_interest.apply(
+            self.df_points_interest.loc[self.df_points_interest.apply(
                 lambda row: point_inside_polygon((row['latitude'], row['longitude']), scaled_polygon),
                 axis=1
             ), 'cluster_id'] = cluster_id
@@ -333,7 +290,7 @@ class FlightClusterApp:
                 showlegend=False  # Set showlegend to False for convex hull traces
             ))
 
-        df_poi_cluster = df_points_interest[df_points_interest["cluster_id"] != -1]  
+        df_poi_cluster = self.df_points_interest[self.df_points_interest["cluster_id"] != -1]  
         # create and empty dataframe with an index until the last cluster with a POI inside, the rest will be dismissed.
         count_df = pd.DataFrame(index=range(df_poi_cluster["cluster_id"].max()+1))
         for tag in self.tags_dict:
@@ -345,12 +302,12 @@ class FlightClusterApp:
         count_df["Total"] = count_df.sum(axis=1)
         count_df = count_df[count_df['Total'] != 0] # finally remove those columns which have 0 POI inside
 
-        cluster_df = self.cluster_dataframe(df_alt_filter)
+        cluster_df = self.cluster_dataframe()
         st.write(cluster_df)
         
         with BytesIO() as output:
             writer = pd.ExcelWriter(output, engine='xlsxwriter')
-            df_alt_filter.to_excel(writer, sheet_name='Data', index=False)
+            self.df_alt_filter.to_excel(writer, sheet_name='Data', index=False)
             parameters_dict = {"altitude_limit" : self.altitude_limit, 
                                "min_samples" : self.min_samples, "centroid_radius" : self.R, 
                                "algorithm" : self.algorithm, "tags" : self.tags_dict}
@@ -503,13 +460,21 @@ class FlightClusterApp:
         
         # Process data based on selected algorithm and UI inputs
         if st.button('Plot Clusters'):
+            
+            alt_filter = (self.df_plot["altitude"] > self.altitude_limit)
+            self.df_alt_filter = self.df_plot.loc[alt_filter].copy()
+            self.df_alt_filter.reset_index(drop=True, inplace=True)
+            
+            # 1st step is to merge the points of interest into 1 in case they are very close, which is done by giving a R value higher than 0
+            self.df_points_interest = self.get_points_of_interest()
+            
             if self.df_plot.empty:
                 raise Exception("No files uploaded, please select the desired parquet files")
             else:
                 if self.algorithm == "POI":
-                    self.plot_point_of_interest(self.df_plot)
+                    self.plot_point_of_interest()
                 else:
-                    self.plot_dbscan(self.df_plot)
+                    self.plot_dbscan()
         
 # Main code
 if __name__ == "__main__":
