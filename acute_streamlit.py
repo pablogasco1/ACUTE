@@ -12,6 +12,7 @@ from scipy.spatial import ConvexHull
 from io import BytesIO
 import googlemaps
 import time
+from sklearn.metrics import silhouette_score
 import src.features.info_help as info_help
 from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
 
@@ -198,6 +199,13 @@ class FlightClusterApp:
         # Plot the drones points
         df_no_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] == -1]
         df_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] != -1]
+        
+        silhouette_avg = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
+        clustered_ratio = len(df_no_cluster) / len(self.df_alt_filter)
+        
+        st.text(f"Silhouette Avg: {silhouette_avg}")
+        st.text(f"Clustered Points Ratio: {np.round(clustered_ratio * 100, 2)}")
+        
         fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='cluster', size="altitude",
                                 color_continuous_scale=px.colors.diverging.Portland ,#px.colors.cyclical.HSV,
                                 zoom=10, height=1000, width=1500,
