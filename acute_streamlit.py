@@ -254,7 +254,7 @@ class FlightClusterApp:
         
         fig.update_layout(
             mapbox_style="dark",
-            mapbox_accesstoken=st.secret["token"] #self.token,
+            mapbox_accesstoken=st.secret["token"], #self.token,
             margin={"r":0,"t":0,"l":0,"b":0},
             autosize=True,
             hovermode='closest',
