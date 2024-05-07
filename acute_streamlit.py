@@ -86,7 +86,7 @@ class FlightClusterApp:
         elif self.api=="GOOGLE":
             
             max_radius = self.df_alt_filter.apply(lambda row: haversine(polygon.centroid.y, polygon.centroid.x, row['latitude'], row['longitude']), axis=1).max()
-            gmaps = googlemaps.Client(key=st.secret["api_key"]) #self.api_key)
+            gmaps = googlemaps.Client(key=st.secrets["api_key"]) #self.api_key)
             place_result = gmaps.places_nearby(location=(polygon.centroid.y, polygon.centroid.x), radius=max_radius*1000, keyword='point of interest', language='en')
             time.sleep(2)
             place_result2 = gmaps.places(page_token=place_result['next_page_token'])
@@ -254,7 +254,7 @@ class FlightClusterApp:
         
         fig.update_layout(
             mapbox_style="dark",
-            mapbox_accesstoken=st.secret["token"], #self.token,
+            mapbox_accesstoken=st.secrets["token"], #self.token,
             margin={"r":0,"t":0,"l":0,"b":0},
             autosize=True,
             hovermode='closest',
