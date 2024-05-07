@@ -305,31 +305,35 @@ class FlightClusterApp:
         cluster_df = self.cluster_dataframe()
         st.write(cluster_df)
         
-        with BytesIO() as output:
-            writer = pd.ExcelWriter(output, engine='xlsxwriter')
-            self.df_alt_filter.to_excel(writer, sheet_name='Data', index=False)
-            parameters_dict = {"altitude_limit" : self.altitude_limit, 
-                               "min_samples" : self.min_samples, "centroid_radius" : self.R, 
-                               "algorithm" : self.algorithm, "tags" : self.tags_dict}
-            
-            if self.algorithm=="POI":
-                parameters_dict["min_distance"]=self.X
-            else:
-                parameters_dict["max_distance"]=self.eps
-            
-            df_parameters = pd.DataFrame.from_dict(parameters_dict, orient="index")
-            df_parameters.T.to_excel(writer, sheet_name='Parameters', index=False)
-            writer.close()
-        
-            st.download_button(
-                label="Download Excel workbook",
-                data=output.getvalue(),
-                file_name="workbook.xlsx",
-                mime="application/vnd.ms-excel"
-            )
+        self.save_table()
             
         st.plotly_chart(fig)
         st.write(count_df)
+        
+    def save_table(self):    
+        
+            with BytesIO() as output:
+                writer = pd.ExcelWriter(output, engine='xlsxwriter')
+                self.df_alt_filter.to_excel(writer, sheet_name='Data', index=False)
+                parameters_dict = {"altitude_limit" : self.altitude_limit, 
+                                "min_samples" : self.min_samples, "centroid_radius" : self.R, 
+                                "algorithm" : self.algorithm, "tags" : self.tags_dict}
+                
+                if self.algorithm=="POI":
+                    parameters_dict["min_distance"]=self.X
+                else:
+                    parameters_dict["max_distance"]=self.eps
+                
+                df_parameters = pd.DataFrame.from_dict(parameters_dict, orient="index")
+                df_parameters.T.to_excel(writer, sheet_name='Parameters', index=False)
+                writer.close()
+            
+                st.download_button(
+                    label="Download Excel workbook",
+                    data=output.getvalue(),
+                    file_name="workbook.xlsx",
+                    mime="application/vnd.ms-excel"
+                )
 
     def display_ui(self):
         
@@ -339,9 +343,8 @@ class FlightClusterApp:
             help=info_help.api_help
         )
         
-        if self.api=="OSMNX":
-            self.token = st.text_input('MapBox Token', '')
-        elif self.api=="GOOGLE":
+        self.token = st.text_input('MapBox Token', '')
+        if self.api=="GOOGLE":
             self.api_key = st.text_input('Google API', '')
         
         self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "OPTICS", "POI"], 
