@@ -12,7 +12,7 @@ from scipy.spatial import ConvexHull
 from io import BytesIO
 import googlemaps
 import time
-import info_help
+import src.features.info_help as info_help
 from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
 
 class FlightClusterApp:
