@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from scipy.spatial.distance import cdist
 from shapely.geometry import Polygon
 import osmnx as ox
 from sklearn.cluster import DBSCAN, HDBSCAN, OPTICS    
@@ -9,10 +8,11 @@ import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime
 from scipy.spatial import ConvexHull
+from scipy.spatial.distance import cdist
 from io import BytesIO
 import googlemaps
 import time
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, silhouette_samples, davies_bouldin_score, calinski_harabasz_score
 import src.features.info_help as info_help
 from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
 
@@ -117,13 +117,13 @@ class FlightClusterApp:
         
         return df_points_reduced
         
-    def plot_point_of_interest(self):        
+    def plot_point_of_interest(self, df, X, min_samples):        
         # 1st step is to get the points of interest which are already merged in case they are very close, 
         # which is done by giving a R value higher than 0 in the sliders
         centroids = self.df_points_interest[["latitude", "longitude"]].values
 
         # 2nd step is to get remove those points who are very far (>X) from these centroids
-        points = self.df_alt_filter[["latitude", "longitude"]].to_numpy()
+        points = df[["latitude", "longitude"]].to_numpy()
         distances0 = cdist(points, centroids, "euclidean")
 
         # Find the index of the closest centroid for each point
@@ -131,20 +131,23 @@ class FlightClusterApp:
 
         # Find the minimum distance for each point to its closest centroid and keep those with a closer distance than X
         min_distances = np.min(distances0, axis=1)
-        dist_mask = min_distances <= self.X
+        dist_mask = min_distances <= X
         points = points[dist_mask]
         clusters0 = clusters0[dist_mask]
-        df_reduced = self.df_alt_filter[dist_mask].copy()
+        df_reduced = df[dist_mask].copy()
 
         # 3rd step is to check now which clusters have a big number of points close (>min_samples)
         # Count the number of points in each cluster
         counts = np.bincount(clusters0)
 
         # Identify clusters with more than min_samples points
-        large_clusters = np.where(counts > self.min_samples)[0]
+        large_clusters = np.where(counts > min_samples)[0]
 
         # Filter out small clusters and their centroids
         filtered_centroids = centroids[large_clusters]
+        
+        # Keep just those POI that accomplish with the previous conditions
+        self.df_points_interest = self.df_points_interest.iloc[large_clusters]
 
         # 4th step is now that some clusters are removed since they didnt have enough points around, some points need will remain in the limbo
         # now, they distances from all the points are calculated to every remaining centroid, those points further than X distance are removed
@@ -156,41 +159,29 @@ class FlightClusterApp:
 
         # Find the minimum distance for each point to its closest centroid and keep those with a closer distance than X
         min_distances = np.min(distances, axis=1)
-        dist_mask = min_distances <= self.X
+        dist_mask = min_distances <= X
         points = points[dist_mask]
         clusters = clusters[dist_mask]
         df_reduced = df_reduced[dist_mask]
         df_reduced["cluster"] = clusters
         
-        if self.show_unclustered:
-            self.df_alt_filter = self.df_alt_filter.merge(df_reduced[["cluster"]], how='left', left_index=True, right_index=True)
-            self.df_alt_filter['cluster'] = self.df_alt_filter['cluster'].fillna(-1)
-            self.df_alt_filter["cluster"] = self.df_alt_filter["cluster"].astype(int)
-        else:
-            self.df_alt_filter = df_reduced
-            
-        # Keep just those POI that accomplish with the previous conditions
-        self.df_points_interest = self.df_points_interest.iloc[large_clusters]
+        df_merged = df.merge(df_reduced[["cluster"]], how='left', left_index=True, right_index=True)
+        
+        return df_merged['cluster'].fillna(-1).astype(int).values
 
-        self.show_graph_table()
-
-    def plot_dbscan(self):  
+    def plot_dbscan(self, df, eps, min_samples):  
         
         if self.algorithm=="DBSCAN":
-            dbscan = DBSCAN(eps=self.eps, min_samples=self.min_samples)
+            dbscan = DBSCAN(eps=eps, min_samples=min_samples)
         elif self.algorithm=="HDBSCAN":
-            dbscan = HDBSCAN(cluster_selection_epsilon=self.eps, min_samples=self.min_samples)
+            dbscan = HDBSCAN(cluster_selection_epsilon=eps, min_samples=min_samples)
         elif self.algorithm=="OPTICS":
-            dbscan = OPTICS(max_eps=self.eps, min_samples=self.min_samples)
+            dbscan = OPTICS(max_eps=eps, min_samples=min_samples)
             
         # Fit the model to the data
-        dbscan.fit(self.df_alt_filter[['latitude', 'longitude']])
-        self.df_alt_filter["cluster"] = dbscan.labels_
-        if not self.show_unclustered:
-            # cluster -1 is those points with no cluster
-            self.df_alt_filter = self.df_alt_filter[self.df_alt_filter["cluster"] >= 0]
+        dbscan.fit(df[['latitude', 'longitude']])
         
-        self.show_graph_table()
+        return dbscan.labels_
 
     def show_graph_table(self):
         # df_alt_filter is the dataframe for all the points with a cluster_id>0
@@ -201,10 +192,11 @@ class FlightClusterApp:
         df_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] != -1]
         
         silhouette_avg = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
-        clustered_ratio = len(df_no_cluster) / len(self.df_alt_filter)
+
+        clustered_ratio = len(df_cluster) / len(self.df_alt_filter)
         
         st.text(f"Silhouette Avg: {silhouette_avg}")
-        st.text(f"Clustered Points Ratio: {np.round(clustered_ratio * 100, 2)}")
+        st.text(f"Clustered Points Ratio: {np.round(clustered_ratio, 3)}")
         
         fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='cluster', size="altitude",
                                 color_continuous_scale=px.colors.diverging.Portland ,#px.colors.cyclical.HSV,
@@ -227,19 +219,23 @@ class FlightClusterApp:
         centroids_df = pd.DataFrame(centroids_list)
         
         #Scatter points with no cluster
-        if not df_no_cluster.empty:
-            fig.add_trace(go.Scattermapbox(
-                lat=df_no_cluster['latitude'],
-                lon=df_no_cluster['longitude'],
-                mode='markers',  # Include text labels
-                marker=dict(size=5, color='black'),
-                name="",
-            ))
-        else:
-            distances = cdist(self.df_points_interest[["latitude", "longitude"]], centroids_df[["latitude", "longitude"]])
-            closest_centroid_distances = np.min(distances, axis=1)
-            max_dist = 0.03
-            self.df_points_interest = self.df_points_interest[closest_centroid_distances < max_dist]
+        if self.show_unclustered:
+            if not df_no_cluster.empty:
+                fig.add_trace(go.Scattermapbox(
+                    lat=df_no_cluster['latitude'],
+                    lon=df_no_cluster['longitude'],
+                    mode='markers',  # Include text labels
+                    marker=dict(size=5, color='black'),
+                    name="",
+                ))
+        # I dont like this, since if the cluster is too big, the points could not be displayed even being inside the cluster
+        # Change it, so it just plots points inside a cluster
+        # else:
+        #     # Remove the points of interest that are far from the clusters, just for plot visualization only
+        #     distances = cdist(self.df_points_interest[["latitude", "longitude"]], centroids_df[["latitude", "longitude"]])
+        #     closest_centroid_distances = np.min(distances, axis=1)
+        #     max_dist = 0.03
+        #     self.df_points_interest = self.df_points_interest[closest_centroid_distances < max_dist]
         
         # Plot 
         fig.add_trace(go.Scattermapbox(
@@ -300,15 +296,19 @@ class FlightClusterApp:
 
         df_poi_cluster = self.df_points_interest[self.df_points_interest["cluster_id"] != -1]  
         # create and empty dataframe with an index until the last cluster with a POI inside, the rest will be dismissed.
-        count_df = pd.DataFrame(index=range(df_poi_cluster["cluster_id"].max()+1))
-        for tag in self.tags_dict:
-            for elem in self.tags_dict[tag]:
-                cond_i = (df_poi_cluster["class"]==tag) & (df_poi_cluster["type"]==elem)
-                count_df[tag + "_" + elem] = df_poi_cluster[cond_i]["cluster_id"].value_counts()
-        count_df = count_df.fillna(0)
-        count_df.loc['Total', :] = count_df.sum(axis=0)
-        count_df["Total"] = count_df.sum(axis=1)
-        count_df = count_df[count_df['Total'] != 0] # finally remove those columns which have 0 POI inside
+        if not df_poi_cluster.empty:
+            count_df = pd.DataFrame(index=range(df_poi_cluster["cluster_id"].max()+1))
+            for tag in self.tags_dict:
+                for elem in self.tags_dict[tag]:
+                    cond_i = (df_poi_cluster["class"]==tag) & (df_poi_cluster["type"]==elem)
+                    count_df[tag + "_" + elem] = df_poi_cluster[cond_i]["cluster_id"].value_counts()
+            count_df = count_df.fillna(0)
+            count_df.loc['Total', :] = count_df.sum(axis=0)
+            count_df["Total"] = count_df.sum(axis=1)
+            count_df = count_df[count_df['Total'] != 0] # finally remove those columns which have 0 POI inside
+            st.write(count_df)
+        else:
+            st.text("There are no point of interest inside any cluster")
 
         cluster_df = self.cluster_dataframe()
         st.write(cluster_df)
@@ -316,7 +316,6 @@ class FlightClusterApp:
         self.save_table()
             
         st.plotly_chart(fig)
-        st.write(count_df)
         
     def save_table(self):    
         
@@ -351,14 +350,10 @@ class FlightClusterApp:
             help=info_help.api_help
         )
         
-        #self.token = st.text_input('MapBox Token', '')
-        #if self.api=="GOOGLE":
-        #    self.api_key = st.text_input('Google API', '')
-        
         self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "OPTICS", "POI"], 
                             help = info_help.algorithm_help)
             
-        self.altitude_limit = st.slider('Altitude Limit', min_value=0, max_value=500, value=10, step=10,
+        self.altitude_limit = st.slider('Altitude Limit', min_value=0, max_value=500, value=0, step=10,
                            help=info_help.altitude_limit_help)
         
         self.R = st.slider('Centroid Radius', min_value=0.0, max_value=0.1, value=0.02, step=0.001, format="%f", 
@@ -368,10 +363,10 @@ class FlightClusterApp:
             self.X = st.slider('Min Distance', min_value=0.001, max_value=0.1, value=0.05, step=0.001, format="%f",
                         help=info_help.min_dist_help)
         else:
-            self.eps = st.slider('Max Distance', min_value=0.001, max_value=0.1, value=0.005, step=0.001, format="%f",
+            self.eps = st.slider('Max Distance', min_value=0.001, max_value=0.006, value=0.005, step=0.001, format="%f",
                             help=info_help.max_dist_help)
 
-        self.min_samples = st.slider('Min Samples', min_value=1, max_value=100, value=17,
+        self.min_samples = st.slider('Min Samples', min_value=5, max_value=25, value=17,
                         help=info_help.min_sample_help)
 
         self.selected_tags = st.multiselect('Tags', options=["building: church", "building: chapel", "building: university", "building: hospital", 
@@ -465,6 +460,28 @@ class FlightClusterApp:
             ), 
             axis=1
         )
+        
+    def get_score(self, df, fun):
+        
+        def score_fun(eps, min_samples):
+            labels = fun(df, eps, min_samples)
+            df["cluster"] = labels
+            n_clusters = len(df["cluster"].unique())
+            
+            if n_clusters <=2 or n_clusters > 50: 
+                return 0
+            
+            df_cluster = df[df["cluster"] != -1]
+            clustered_ratio = len(df_cluster) / len(df)
+            
+            if clustered_ratio < 0.6 or clustered_ratio > 0.95:
+                return 0
+            
+            sil_score = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
+            
+            return sil_score * clustered_ratio
+        return score_fun
+        
 
     def run(self):
         self.display_ui()
@@ -472,8 +489,7 @@ class FlightClusterApp:
         # Process data based on selected algorithm and UI inputs
         if st.button('Plot Clusters'):
             
-            alt_filter = (self.df_plot["altitude"] > self.altitude_limit)
-            self.df_alt_filter = self.df_plot.loc[alt_filter].copy()
+            self.df_alt_filter = self.df_plot.loc[self.df_plot["altitude"] > self.altitude_limit].copy()
             self.df_alt_filter.reset_index(drop=True, inplace=True)
             
             # 1st step is to merge the points of interest into 1 in case they are very close, which is done by giving a R value higher than 0
@@ -483,10 +499,36 @@ class FlightClusterApp:
                 raise Exception("No files uploaded, please select the desired parquet files")
             else:
                 if self.algorithm == "POI":
-                    self.plot_point_of_interest()
+                    clusters = self.plot_point_of_interest(self.df_alt_filter, self.X, self.min_samples)
                 else:
-                    self.plot_dbscan()
-        
+                    clusters = self.plot_dbscan(self.df_alt_filter, self.eps, self.min_samples)
+                    
+                self.df_alt_filter["cluster"] = clusters
+                self.show_graph_table()
+                
+        if st.button("Optimization"):
+            self.df_alt_filter = self.df_plot.loc[self.df_plot["altitude"] > self.altitude_limit].copy()
+            self.df_alt_filter.reset_index(drop=True, inplace=True)
+            
+            score_fun = self.get_score(self.df_alt_filter, self.plot_dbscan)
+            
+            max_score = 0
+            max_score_eps = 0
+            max_score_sampl = 0
+            for sampl_i in np.arange(5, 25, 1):
+                
+                for eps_i in np.arange(0.001, 0.006, 0.001):
+                    score = score_fun(eps_i, sampl_i)
+                    if score > max_score:
+                        max_score = score
+                        max_score_eps = eps_i
+                        max_score_sampl = sampl_i
+                        
+            st.text(f"Parameters: eps={max_score_eps}, min_sample={max_score_sampl}")
+            
+            
+            
+            
 # Main code
 if __name__ == "__main__":
     app = FlightClusterApp()
