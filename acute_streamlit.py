@@ -23,7 +23,7 @@ class FlightClusterApp:
         self.df = pd.DataFrame()
         self.grouped_df = pd.DataFrame()
     
-    def cluster_dataframe(self):
+    def cluster_dataframe(self) -> pd.DataFrame:
         # Group by 'cluster' and calculate the necessary statistics
         cluster_df = self.df_alt_filter.groupby('cluster').agg({
             'altitude': ['count', 'max', 'std', 'mean'],
@@ -50,7 +50,7 @@ class FlightClusterApp:
 
         return cluster_df
 
-    def get_points_of_interest(self):
+    def get_points_of_interest(self) -> pd.DataFrame:
         lat_min, lat_max = self.df_alt_filter["latitude"].min(), self.df_alt_filter["latitude"].max()
         lon_min, lon_max = self.df_alt_filter["longitude"].min(), self.df_alt_filter["longitude"].max()
         polygon = Polygon([(lon_min, lat_min), (lon_min, lat_max), (lon_max, lat_max), (lon_max, lat_min)])
@@ -91,11 +91,11 @@ class FlightClusterApp:
             place_result = gmaps.places_nearby(location=(polygon.centroid.y, polygon.centroid.x), radius=max_radius*1000, keyword='point of interest', language='en')
             time.sleep(2)
             place_result2 = gmaps.places(page_token=place_result['next_page_token'])
-            place_result_list = place_result["results"] + place_result2["results"]
-            df_points_reduced['latitude'] = [i["geometry"]["location"]["lat"] for i in place_result_list]
-            df_points_reduced['longitude'] = [i["geometry"]["location"]["lng"] for i in place_result_list]
+            maps_places_list = place_result["results"] + place_result2["results"]
+            df_points_reduced['latitude'] = [i["geometry"]["location"]["lat"] for i in maps_places_list]
+            df_points_reduced['longitude'] = [i["geometry"]["location"]["lng"] for i in maps_places_list]
             
-            for ind, i in enumerate(place_result_list):                 
+            for ind, i in enumerate(maps_places_list):                 
                 class_i = "none"
                 type_i = "none"
                 try:
@@ -117,7 +117,7 @@ class FlightClusterApp:
         
         return df_points_reduced
         
-    def plot_point_of_interest(self, df, X, min_samples):        
+    def plot_point_of_interest(self, df : pd.DataFrame, X : float, min_samples) -> np.ndarray:        
         # 1st step is to get the points of interest which are already merged in case they are very close, 
         # which is done by giving a R value higher than 0 in the sliders
         centroids = self.df_points_interest[["latitude", "longitude"]].values
@@ -169,14 +169,14 @@ class FlightClusterApp:
         
         return df_merged['cluster'].fillna(-1).astype(int).values
 
-    def plot_dbscan(self, df, eps, min_samples):  
+    def plot_dbscan(self, df : pd.DataFrame, eps : float, min_samples) -> np.ndarray:  
         
         if self.algorithm=="DBSCAN":
             dbscan = DBSCAN(eps=eps, min_samples=min_samples)
         elif self.algorithm=="HDBSCAN":
             dbscan = HDBSCAN(cluster_selection_epsilon=eps, min_samples=min_samples)
-        elif self.algorithm=="OPTICS":
-            dbscan = OPTICS(max_eps=eps, min_samples=min_samples)
+        #elif self.algorithm=="OPTICS":
+        #    dbscan = OPTICS(max_eps=eps, min_samples=min_samples)
             
         # Fit the model to the data
         dbscan.fit(df[['latitude', 'longitude']])
@@ -350,7 +350,7 @@ class FlightClusterApp:
             help=info_help.api_help
         )
         
-        self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "OPTICS", "POI"], 
+        self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "POI"], 
                             help = info_help.algorithm_help)
             
         self.altitude_limit = st.slider('Altitude Limit', min_value=0, max_value=500, value=0, step=10,
@@ -369,10 +369,11 @@ class FlightClusterApp:
         self.min_samples = st.slider('Min Samples', min_value=5, max_value=25, value=17,
                         help=info_help.min_sample_help)
 
-        self.selected_tags = st.multiselect('Tags', options=["building: church", "building: chapel", "building: university", "building: hospital", 
-                                                    "building: government", "building: stadium", "amenity: prison", "amenity: police"], 
-                                default=["building: university"],
-                                help=info_help.select_tag_help)
+        if self.api=="OSMNX":
+            self.selected_tags = st.multiselect('Tags', options=["building: church", "building: chapel", "building: university", "building: hospital", 
+                                                        "building: government", "building: stadium", "amenity: prison", "amenity: police"], 
+                                    default=["building: university"],
+                                    help=info_help.select_tag_help)
         
         self.show_unclustered = st.checkbox('Show unclustered points', value=False, 
                           help=info_help.show_uncluster_help)
@@ -382,10 +383,8 @@ class FlightClusterApp:
                           help=info_help.reduce_jrny_help)
 
         if self.reduce_jrny:
-            mean_max = st.radio(
-            "Max or Mean:",
-            ["Max", "Mean"],
-            help=info_help.max_mean_help) 
+            #mean_max = st.radio("Max or Mean:", ["Max", "Mean"], help=info_help.max_mean_help) 
+            mean_max = "max"
             
             grouped_df = pd.DataFrame()
             if not self.df.empty:
@@ -461,9 +460,9 @@ class FlightClusterApp:
             axis=1
         )
         
-    def get_score(self, df, fun):
+    def get_score(self, df : pd.DataFrame, fun) -> float:
         
-        def score_fun(eps, min_samples):
+        def score_fun(eps : float, min_samples : int):
             labels = fun(df, eps, min_samples)
             df["cluster"] = labels
             n_clusters = len(df["cluster"].unique())
