@@ -55,7 +55,6 @@ class FlightClusterApp:
         lon_min, lon_max = self.df_alt_filter["longitude"].min(), self.df_alt_filter["longitude"].max()
         polygon = Polygon([(lon_min, lat_min), (lon_min, lat_max), (lon_max, lat_max), (lon_max, lat_min)])
         
-        df_points_reduced = pd.DataFrame()
         self.tags_dict = dict()
         if self.api=="OSMNX":
             # Loop through the selected tags
@@ -75,6 +74,7 @@ class FlightClusterApp:
             df_points_interest['longitude'] = df_points_interest['geometry'].apply(lambda x: x.centroid.coords.xy[0][0])
             df_points_interest['latitude'] = df_points_interest['geometry'].apply(lambda x: x.centroid.coords.xy[1][0])
             
+            df_points_reduced = pd.DataFrame()
             for tag in self.tags_dict:
                 for elem in self.tags_dict[tag]:
                     cond_i = df_points_interest[tag] == elem
@@ -83,17 +83,25 @@ class FlightClusterApp:
                     df_temp["class"] = tag
                     df_temp["type"] = elem
                     df_points_reduced = pd.concat([df_points_reduced, df_temp], ignore_index=True)
+            self.df_points_interest = df_points_reduced
             
         elif self.api=="GOOGLE":
-            
+            if hasattr(self, "polygon") and hasattr(self, "df_points_google"):
+                if self.polygon == polygon:
+                    self.df_points_interest = self.df_points_google
+                    return 0
+            else:
+                self.polygon = polygon
+                    
             max_radius = self.df_alt_filter.apply(lambda row: haversine(polygon.centroid.y, polygon.centroid.x, row['latitude'], row['longitude']), axis=1).max()
             gmaps = googlemaps.Client(key=st.secrets["api_key"]) #self.api_key)
             place_result = gmaps.places_nearby(location=(polygon.centroid.y, polygon.centroid.x), radius=max_radius*1000, keyword='point of interest', language='en')
             time.sleep(2)
             place_result2 = gmaps.places(page_token=place_result['next_page_token'])
             maps_places_list = place_result["results"] + place_result2["results"]
-            df_points_reduced['latitude'] = [i["geometry"]["location"]["lat"] for i in maps_places_list]
-            df_points_reduced['longitude'] = [i["geometry"]["location"]["lng"] for i in maps_places_list]
+            df_points_interest = pd.DataFrame()
+            df_points_interest['latitude'] = [i["geometry"]["location"]["lat"] for i in maps_places_list]
+            df_points_interest['longitude'] = [i["geometry"]["location"]["lng"] for i in maps_places_list]
             
             for ind, i in enumerate(maps_places_list):                 
                 class_i = "none"
@@ -109,13 +117,14 @@ class FlightClusterApp:
                                 class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"].split("-")[1], which_result=1)[["class", "type"]].values[0]
                             except ox._errors.InsufficientResponseError:
                                 pass
-                df_points_reduced.loc[ind, "class"] = class_i
-                df_points_reduced.loc[ind, "type"] = type_i 
+                df_points_interest.loc[ind, "class"] = class_i
+                df_points_interest.loc[ind, "type"] = type_i 
                 if class_i not in self.tags_dict:
                     self.tags_dict[class_i] = []
                 self.tags_dict[class_i].append(type_i)
-        
-        return df_points_reduced
+                
+            self.df_points_google = df_points_interest
+            self.df_points_interest = df_points_interest
         
     def plot_point_of_interest(self, df : pd.DataFrame, X : float, min_samples) -> np.ndarray:        
         # 1st step is to get the points of interest which are already merged in case they are very close, 
@@ -323,9 +332,12 @@ class FlightClusterApp:
                 writer = pd.ExcelWriter(output, engine='xlsxwriter')
                 self.df_alt_filter.to_excel(writer, sheet_name='Data', index=False)
                 parameters_dict = {"altitude_limit" : self.altitude_limit, 
-                                "min_samples" : self.min_samples, "centroid_radius" : self.R, 
+                                "min_samples" : self.min_samples,
                                 "algorithm" : self.algorithm, "tags" : self.tags_dict}
                 
+                if self.api == "OSMNX":
+                    parameters_dict["centroid_radius"]=self.R
+                    
                 if self.algorithm=="POI":
                     parameters_dict["min_distance"]=self.X
                 else:
@@ -350,14 +362,15 @@ class FlightClusterApp:
             help=info_help.api_help
         )
         
+        if self.api=="OSMNX":
+            self.R = st.slider('Centroid Radius', min_value=0.0, max_value=0.1, value=0.02, step=0.001, format="%f", 
+                  help=info_help.centroid_radius_help)
+        
         self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "POI"], 
                             help = info_help.algorithm_help)
             
         self.altitude_limit = st.slider('Altitude Limit', min_value=0, max_value=500, value=0, step=10,
                            help=info_help.altitude_limit_help)
-        
-        self.R = st.slider('Centroid Radius', min_value=0.0, max_value=0.1, value=0.02, step=0.001, format="%f", 
-                  help=info_help.centroid_radius_help)
 
         if self.algorithm=="POI":
             self.X = st.slider('Min Distance', min_value=0.001, max_value=0.1, value=0.05, step=0.001, format="%f",
@@ -492,7 +505,7 @@ class FlightClusterApp:
             self.df_alt_filter.reset_index(drop=True, inplace=True)
             
             # 1st step is to merge the points of interest into 1 in case they are very close, which is done by giving a R value higher than 0
-            self.df_points_interest = self.get_points_of_interest()
+            self.get_points_of_interest()
             
             if self.df_plot.empty:
                 raise Exception("No files uploaded, please select the desired parquet files")
