@@ -15,6 +15,7 @@ import time
 from sklearn.metrics import silhouette_score, silhouette_samples, davies_bouldin_score, calinski_harabasz_score
 import src.features.info_help as info_help
 from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
+import inspect
 
 class FlightClusterApp:
     def __init__(self):
@@ -93,12 +94,19 @@ class FlightClusterApp:
             else:
                 self.polygon = polygon
                     
+            maps_places_list = list()
             max_radius = self.df_alt_filter.apply(lambda row: haversine(polygon.centroid.y, polygon.centroid.x, row['latitude'], row['longitude']), axis=1).max()
             gmaps = googlemaps.Client(key=st.secrets["api_key"]) #self.api_key)
             place_result = gmaps.places_nearby(location=(polygon.centroid.y, polygon.centroid.x), radius=max_radius*1000, keyword='point of interest', language='en')
-            time.sleep(2)
-            place_result2 = gmaps.places(page_token=place_result['next_page_token'])
-            maps_places_list = place_result["results"] + place_result2["results"]
+            maps_places_list = place_result["results"]
+            while "next_page_token" in place_result.keys():
+                print("HIIIIIIIIIIIIIIIIIIIII")
+                time.sleep(2)
+                place_result = gmaps.places(page_token=place_result['next_page_token'])
+                maps_places_list += place_result["results"]
+            
+            print("Place Maps length", len(maps_places_list))
+            #maps_places_list = place_result["results"] + place_result2["results"]
             df_points_interest = pd.DataFrame()
             df_points_interest['latitude'] = [i["geometry"]["location"]["lat"] for i in maps_places_list]
             df_points_interest['longitude'] = [i["geometry"]["location"]["lng"] for i in maps_places_list]
@@ -108,14 +116,14 @@ class FlightClusterApp:
                 type_i = "none"
                 try:
                     class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"], which_result=1)[["class", "type"]].values[0]
-                except ox._errors.InsufficientResponseError:
+                except: #ox._errors.InsufficientResponseError:
                     if len(i["name"].split("-"))>1:
                         try:
                             class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"].split("-")[0], which_result=1)[["class", "type"]].values[0]
-                        except ox._errors.InsufficientResponseError:
+                        except: #ox._errors.InsufficientResponseError:
                             try:
                                 class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"].split("-")[1], which_result=1)[["class", "type"]].values[0]
-                            except ox._errors.InsufficientResponseError:
+                            except: #ox._errors.InsufficientResponseError:
                                 pass
                 df_points_interest.loc[ind, "class"] = class_i
                 df_points_interest.loc[ind, "type"] = type_i 
@@ -276,7 +284,7 @@ class FlightClusterApp:
         
         # Compute convex hull for each cluster and plot
         self.df_points_interest['cluster_id'] = -1  # Initialize cluster ID column
-        
+
         for cluster_id, group_df in df_cluster.groupby('cluster'):
             points = group_df[['latitude', 'longitude']].values
             hull = ConvexHull(points)
@@ -355,8 +363,11 @@ class FlightClusterApp:
                 )
 
     def display_ui(self):
+        print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         
-        self.upload_and_process_data()
+        self.uploaded_files = st.file_uploader("Choose Parquet files", type="parquet", accept_multiple_files=True)
+        if self.uploaded_files:
+            self.upload_and_process_data()
         
         self.api = st.radio("API Selection", ["OSMNX", "GOOGLE"],
             help=info_help.api_help
@@ -417,24 +428,24 @@ class FlightClusterApp:
             self.df_plot = self.df.copy()
 
     def upload_and_process_data(self):
-        self.uploaded_files = st.file_uploader("Choose Parquet files", type="parquet", accept_multiple_files=True)
+        print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         dfs = []
-        if self.uploaded_files:
-            for uploaded_file in self.uploaded_files:
-                # Read each parquet file into a DataFrame
-                df_i = pd.read_parquet(uploaded_file)
-                dfs.append(df_i)
+        for uploaded_file in self.uploaded_files:
+            # Read each parquet file into a DataFrame
+            df_i = pd.read_parquet(uploaded_file)
+            dfs.append(df_i)
 
-            if dfs:
-                self.df = pd.concat(dfs, ignore_index=True)
+        if dfs:
+            self.df = pd.concat(dfs, ignore_index=True)
 
-                # Further processing steps
-                self.process_data()
+            # Further processing steps
+            self.process_data()
 
     def process_data(self):
+        print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         # Create date and time selectors
         start_time = st.date_input('Start date', value=pd.to_datetime('2023-06-21'))
-        end_time =   st.date_input('End date',   value=pd.to_datetime('2023-12-31'))
+        end_time =   st.date_input('End date',   value=pd.to_datetime('2025-12-31'))
         
         # Convert the date objects to datetime
         start_time = datetime.combine(start_time, datetime.min.time())
@@ -442,32 +453,37 @@ class FlightClusterApp:
 
         # Create a dropdown menu for station names
         station_names = self.df['station_name'].unique().tolist()
-        station_names.insert(0, station_names.pop(station_names.index("0QRDKC2R03J32P")))
+        #station_names.insert(0, station_names.pop(station_names.index("0QRDKC2R03J32P")))
         selected_station = st.selectbox('Select a station', station_names)
-
+        print(self.df.shape)        
         # Apply the mask
         # Convert 'timestamp' to datetime
-        self.df['timestamp'] = pd.to_datetime(self.df['timestamp'])
-        
+        if self.df["timestamp"].dtype == object:
+            self.df['timestamp'] = pd.to_datetime(self.df['timestamp'])
+        else:
+            self.df['timestamp'] = pd.to_datetime(self.df['timestamp'], unit="s")
+
         # Filter 1 based on the user selection
         time_mask = (self.df['timestamp'] > start_time) & (self.df['timestamp'] <= end_time) & (self.df["station_name"] == selected_station)
         self.df = self.df[time_mask]
         
         # Filter 2 to remove those points further than 1.5 times the std
-        coordinates_df = self.df[['latitude', 'longitude']]
-        z_scores = np.abs((coordinates_df - coordinates_df.mean()) / coordinates_df.std())
-        threshold = 2
-        mask = (z_scores < threshold).all(axis=1)
-        self.df = self.df[mask]
-        
+        self.df['station_horiz_distance'] = haversine(self.df['station_latitude'], self.df['station_longitude'], self.df['latitude'], self.df['longitude'])
+        print(self.df["station_horiz_distance"].describe())
+        # Radius limit
+        radius = 100  # kilometers
+
+        # Filter the DataFrame to only include rows where the distance is less than or equal to the radius
+        self.df = self.df[self.df['station_horiz_distance'] <= radius]
+        print(self.df.shape)
         # Haversine distance gives the 2d distance, so the elevation is added to obtain the 3d distance
         self.df['distance'] = self.df.apply(
             lambda df: np.sqrt(
                 (haversine(
-                    np.radians(df['latitude']), 
-                    np.radians(df['longitude']), 
-                    np.radians(df['home_lat']), 
-                    np.radians(df['home_lon'])
+                    df['latitude'], 
+                    df['longitude'], 
+                    df['home_lat'], 
+                    df['home_lon']
                 )**2) + df['elevation']**2
             ), 
             axis=1
@@ -486,7 +502,7 @@ class FlightClusterApp:
             df_cluster = df[df["cluster"] != -1]
             clustered_ratio = len(df_cluster) / len(df)
             
-            if clustered_ratio < 0.6 or clustered_ratio > 0.95:
+            if clustered_ratio < 0.3 or clustered_ratio > 0.98:
                 return 0
             
             sil_score = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
@@ -496,11 +512,11 @@ class FlightClusterApp:
         
 
     def run(self):
-        self.display_ui()
+        print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
+        #self.display_ui()
         
         # Process data based on selected algorithm and UI inputs
         if st.button('Plot Clusters'):
-            
             self.df_alt_filter = self.df_plot.loc[self.df_plot["altitude"] > self.altitude_limit].copy()
             self.df_alt_filter.reset_index(drop=True, inplace=True)
             
@@ -536,12 +552,10 @@ class FlightClusterApp:
                         max_score_eps = eps_i
                         max_score_sampl = sampl_i
                         
-            st.text(f"Parameters: eps={max_score_eps}, min_sample={max_score_sampl}")
-            
-            
-            
+            st.text(f"Parameters: max_score={max_score}, eps={max_score_eps}, min_sample={max_score_sampl}")
             
 # Main code
 if __name__ == "__main__":
     app = FlightClusterApp()
+    app.display_ui()
     app.run()
