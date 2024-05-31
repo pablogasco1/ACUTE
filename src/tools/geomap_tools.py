@@ -22,6 +22,11 @@ def scale_polygon(polygon, point, factor):
         
     return np.array(scaled_polygon)
 
+def haversine_cdist(point1, point2):
+    lon1, lat1 = point1
+    lon2, lat2 = point2
+    return haversine(lat1, lon1, lat2, lon2)
+
 def haversine(lat1, lon1, lat2, lon2):
     """
     Calculate the great circle distance in kilometers between two points 

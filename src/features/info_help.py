@@ -17,11 +17,9 @@ api_help = "API to determine the Points of Interest"
 
 min_dist_help = "Points further than the minimum distance won't be considered for the cluster creation"
 
-max_dist_help = "For DBSCAN stands for: The maximum distance between two samples for one to be considered as in the neighborhood of the other. \
+max_dist_help = "It stands for: The maximum distance between two samples for one to be considered as in the neighborhood of the other. \
                             This is not a maximum bound on the distances of points within a cluster. This is the most important DBSCAN parameter to choose appropriately \
-                            for your data set and distance function. \
-                            For HDBSCAN stands for: A distance threshold. Clusters below this value will be merged. \
-                            For OPTICS stands for: The maximum distance between two samples for one to be considered as in the neighborhood of the other."
+                            for your data set and distance function. Clusters below this value will be merged."
                             
                             
 min_sample_help = "The number of samples (or total weight) in a neighborhood for a point to be considered as a core point. This includes the point itself."

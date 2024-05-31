@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from shapely.geometry import Polygon
 import osmnx as ox
-from sklearn.cluster import DBSCAN, HDBSCAN, OPTICS    
+from sklearn.cluster import DBSCAN, HDBSCAN    
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
@@ -12,9 +12,9 @@ from scipy.spatial.distance import cdist
 from io import BytesIO
 import googlemaps
 import time
-from sklearn.metrics import silhouette_score, silhouette_samples, davies_bouldin_score, calinski_harabasz_score
+from sklearn.metrics import silhouette_score
 import src.features.info_help as info_help
-from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
+from src.tools.geomap_tools import haversine, haversine_cdist, scale_polygon, point_inside_polygon, merge_close_points
 import inspect
 
 class FlightClusterApp:
@@ -192,8 +192,6 @@ class FlightClusterApp:
             dbscan = DBSCAN(eps=eps, min_samples=min_samples)
         elif self.algorithm=="HDBSCAN":
             dbscan = HDBSCAN(cluster_selection_epsilon=eps, min_samples=min_samples)
-        #elif self.algorithm=="OPTICS":
-        #    dbscan = OPTICS(max_eps=eps, min_samples=min_samples)
             
         # Fit the model to the data
         dbscan.fit(df[['latitude', 'longitude']])
@@ -287,6 +285,8 @@ class FlightClusterApp:
 
         for cluster_id, group_df in df_cluster.groupby('cluster'):
             points = group_df[['latitude', 'longitude']].values
+            print(group_df)
+            print(group_df.shape)
             hull = ConvexHull(points)
             hull_points = points[hull.vertices]
             hull_points = np.append(hull_points, [hull_points[0]], axis=0)  # Close the polygon
@@ -405,7 +405,16 @@ class FlightClusterApp:
 
         self.reduce_jrny = st.checkbox('Reduce Journey', value=True, 
                           help=info_help.reduce_jrny_help)
+        
+        self.analyze_pilots = st.checkbox('Pilot Analysis', value=False)
+        
+        # Analyze drones or pilots
+        if self.analyze_pilots:
+            self.df.rename(columns={"home_lat" : "latitude", "home_lon" : "longitude"}, inplace=True)
+        else:
+            self.df.rename(columns={"drone_latitude" : "latitude", "drone_longitude" : "longitude"}, inplace=True)
 
+        print(self.df.columns)
         if self.reduce_jrny:
             #mean_max = st.radio("Max or Mean:", ["Max", "Mean"], help=info_help.max_mean_help) 
             mean_max = "max"
@@ -454,8 +463,7 @@ class FlightClusterApp:
         # Create a dropdown menu for station names
         station_names = self.df['station_name'].unique().tolist()
         #station_names.insert(0, station_names.pop(station_names.index("0QRDKC2R03J32P")))
-        selected_station = st.selectbox('Select a station', station_names)
-        print(self.df.shape)        
+        selected_station = st.selectbox('Select a station', station_names)     
         # Apply the mask
         # Convert 'timestamp' to datetime
         if self.df["timestamp"].dtype == object:
@@ -467,21 +475,24 @@ class FlightClusterApp:
         time_mask = (self.df['timestamp'] > start_time) & (self.df['timestamp'] <= end_time) & (self.df["station_name"] == selected_station)
         self.df = self.df[time_mask]
         
-        # Filter 2 to remove those points further than 1.5 times the std
-        self.df['station_horiz_distance'] = haversine(self.df['station_latitude'], self.df['station_longitude'], self.df['latitude'], self.df['longitude'])
-        print(self.df["station_horiz_distance"].describe())
+        # Rename
+        self.df.rename(columns={"latitude": "drone_latitude", "longitude": "drone_longitude"}, inplace=True)
+        
+        # Filter to remove those points further than radius km from the station
+        self.df['station_horiz_distance'] = haversine(self.df['station_latitude'], self.df['station_longitude'], self.df['drone_latitude'], self.df['drone_longitude'])
+        
         # Radius limit
         radius = 100  # kilometers
 
         # Filter the DataFrame to only include rows where the distance is less than or equal to the radius
         self.df = self.df[self.df['station_horiz_distance'] <= radius]
-        print(self.df.shape)
+        
         # Haversine distance gives the 2d distance, so the elevation is added to obtain the 3d distance
         self.df['distance'] = self.df.apply(
             lambda df: np.sqrt(
                 (haversine(
-                    df['latitude'], 
-                    df['longitude'], 
+                    df['drone_latitude'], 
+                    df['drone_longitude'], 
                     df['home_lat'], 
                     df['home_lon']
                 )**2) + df['elevation']**2
@@ -510,7 +521,6 @@ class FlightClusterApp:
             return sil_score * clustered_ratio
         return score_fun
         
-
     def run(self):
         print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         #self.display_ui()
