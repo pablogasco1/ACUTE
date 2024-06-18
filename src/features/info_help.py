@@ -9,15 +9,15 @@ algorithm_help = "Select the algorithm to cluster the flights: \
             than the current sklearn implementation of DBSCAN. \n \
             POI: Point of Interest, cluster the points to the nearest point of interest selected by the user"
             
-altitude_limit_help = "Remove those flights with altitude lower than the limit"           
+altitude_limit_help = "[Meters] Remove those flights with altitude lower than the limit"           
 
-centroid_radius_help = "Points of Interest inside the same radius will be averaged into one"
+centroid_radius_help = "[Kilometers] Points of Interest inside the same radius will be averaged into one"
 
 api_help = "API to determine the Points of Interest"
 
-min_dist_help = "Points further than the minimum distance won't be considered for the cluster creation"
+min_dist_help = "[Kilometers] Points further than the minimum distance won't be considered for the cluster creation"
 
-max_dist_help = "It stands for: The maximum distance between two samples for one to be considered as in the neighborhood of the other. \
+max_dist_help = "[Kilometers] It stands for: The maximum distance between two samples for one to be considered as in the neighborhood of the other. \
                             This is not a maximum bound on the distances of points within a cluster. This is the most important DBSCAN parameter to choose appropriately \
                             for your data set and distance function. Clusters below this value will be merged."
                             

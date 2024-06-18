@@ -8,13 +8,14 @@ import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime
 from scipy.spatial import ConvexHull
+from sklearn.metrics.pairwise import haversine_distances
 from scipy.spatial.distance import cdist
 from io import BytesIO
 import googlemaps
 import time
 from sklearn.metrics import silhouette_score
 import src.features.info_help as info_help
-from src.tools.geomap_tools import haversine, haversine_cdist, scale_polygon, point_inside_polygon, merge_close_points
+from src.tools.geomap_tools import haversine, haversine_dist, scale_polygon, point_inside_polygon, merge_close_points
 import inspect
 
 class FlightClusterApp:
@@ -141,7 +142,7 @@ class FlightClusterApp:
 
         # 2nd step is to get remove those points who are very far (>X) from these centroids
         points = df[["latitude", "longitude"]].to_numpy()
-        distances0 = cdist(points, centroids, "euclidean")
+        distances0 = cdist(points, centroids, metric=haversine_dist)
 
         # Find the index of the closest centroid for each point
         clusters0 = np.argmin(distances0, axis=1)
@@ -169,7 +170,7 @@ class FlightClusterApp:
         # 4th step is now that some clusters are removed since they didnt have enough points around, some points need will remain in the limbo
         # now, they distances from all the points are calculated to every remaining centroid, those points further than X distance are removed
         # Recalculate the distances
-        distances = cdist(points, filtered_centroids, "euclidean")
+        distances = cdist(points, filtered_centroids, metric=haversine_dist)
 
         # Find the index of the closest centroid for each point
         clusters = np.argmin(distances, axis=1)
@@ -188,13 +189,15 @@ class FlightClusterApp:
 
     def plot_dbscan(self, df : pd.DataFrame, eps : float, min_samples) -> np.ndarray:  
         
+        km_per_radian = 6371.0088
         if self.algorithm=="DBSCAN":
-            dbscan = DBSCAN(eps=eps, min_samples=min_samples)
+            
+            dbscan = DBSCAN(eps=eps/km_per_radian, min_samples=min_samples, metric="haversine")
         elif self.algorithm=="HDBSCAN":
-            dbscan = HDBSCAN(cluster_selection_epsilon=eps, min_samples=min_samples)
+            dbscan = HDBSCAN(cluster_selection_epsilon=eps/km_per_radian, min_samples=min_samples, metric="haversine")
             
         # Fit the model to the data
-        dbscan.fit(df[['latitude', 'longitude']])
+        dbscan.fit(np.radians(df[['latitude', 'longitude']]))
         
         return dbscan.labels_
 
@@ -206,7 +209,12 @@ class FlightClusterApp:
         df_no_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] == -1]
         df_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] != -1]
         
-        silhouette_avg = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
+        # Calculate pairwise distances
+        distance_matrix = haversine_distances(np.radians(df_cluster[['latitude', 'longitude']]))
+
+        # Use precomputed distance matrix instead of directly using coordinates
+        silhouette_avg = silhouette_score(distance_matrix, df_cluster["cluster"], metric='precomputed')
+        #silhouette_avg = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
 
         clustered_ratio = len(df_cluster) / len(self.df_alt_filter)
         
@@ -285,9 +293,7 @@ class FlightClusterApp:
 
         for cluster_id, group_df in df_cluster.groupby('cluster'):
             points = group_df[['latitude', 'longitude']].values
-            print(group_df)
-            print(group_df.shape)
-            hull = ConvexHull(points)
+            hull = ConvexHull(points) # it could fail if the data is for pilots, since the data could be really close and the convexhull doesnt work
             hull_points = points[hull.vertices]
             hull_points = np.append(hull_points, [hull_points[0]], axis=0)  # Close the polygon
             
@@ -338,7 +344,11 @@ class FlightClusterApp:
         
             with BytesIO() as output:
                 writer = pd.ExcelWriter(output, engine='xlsxwriter')
-                self.df_alt_filter.to_excel(writer, sheet_name='Data', index=False)
+                if self.reduce_jrny:
+                    self.df_save = pd.merge(self.df, self.df_alt_filter[["journey", "cluster"]], how="left", on="journey").fillna(-1)
+                    self.df_save.to_excel(writer, sheet_name='Data', index=False)
+                else:
+                    self.df_alt_filter.to_excel(writer, sheet_name='Data', index=False)
                 parameters_dict = {"altitude_limit" : self.altitude_limit, 
                                 "min_samples" : self.min_samples,
                                 "algorithm" : self.algorithm, "tags" : self.tags_dict}
@@ -374,7 +384,7 @@ class FlightClusterApp:
         )
         
         if self.api=="OSMNX":
-            self.R = st.slider('Centroid Radius', min_value=0.0, max_value=0.1, value=0.02, step=0.001, format="%f", 
+            self.R = st.slider('Centroid Radius', min_value=0.0, max_value=1.0, value=0.5, step=0.02, format="%f", 
                   help=info_help.centroid_radius_help)
         
         self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "POI"], 
@@ -387,10 +397,10 @@ class FlightClusterApp:
             self.X = st.slider('Min Distance', min_value=0.001, max_value=0.1, value=0.05, step=0.001, format="%f",
                         help=info_help.min_dist_help)
         else:
-            self.eps = st.slider('Max Distance', min_value=0.001, max_value=0.006, value=0.005, step=0.001, format="%f",
+            self.eps = st.slider('Max Distance', min_value=0.05, max_value=1.0, value=0.4, step=0.05, format="%f",
                             help=info_help.max_dist_help)
 
-        self.min_samples = st.slider('Min Samples', min_value=5, max_value=25, value=17,
+        self.min_samples = st.slider('Min Samples', min_value=5, max_value=25, value=7,
                         help=info_help.min_sample_help)
 
         if self.api=="OSMNX":
@@ -402,11 +412,13 @@ class FlightClusterApp:
         self.show_unclustered = st.checkbox('Show unclustered points', value=False, 
                           help=info_help.show_uncluster_help)
 
-
-        self.reduce_jrny = st.checkbox('Reduce Journey', value=True, 
-                          help=info_help.reduce_jrny_help)
-        
         self.analyze_pilots = st.checkbox('Pilot Analysis', value=False)
+        
+        if self.analyze_pilots:
+            self.reduce_jrny = True
+        else:
+            self.reduce_jrny = st.checkbox('Reduce Journey', value=True, 
+                          help=info_help.reduce_jrny_help)
         
         # Analyze drones or pilots
         if self.analyze_pilots:
@@ -516,7 +528,12 @@ class FlightClusterApp:
             if clustered_ratio < 0.3 or clustered_ratio > 0.98:
                 return 0
             
-            sil_score = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
+            # Calculate pairwise distances in your dataframe
+            distance_matrix = haversine_distances(df_cluster[['latitude', 'longitude']])
+
+            # Use precomputed distance matrix instead of directly using coordinates
+            sil_score = silhouette_score(distance_matrix, df_cluster["cluster"], metric='precomputed')
+            #sil_score = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
             
             return sil_score * clustered_ratio
         return score_fun
@@ -555,7 +572,7 @@ class FlightClusterApp:
             max_score_sampl = 0
             for sampl_i in np.arange(5, 25, 1):
                 
-                for eps_i in np.arange(0.001, 0.006, 0.001):
+                for eps_i in np.arange(0.05, 1, 0.05):
                     score = score_fun(eps_i, sampl_i)
                     if score > max_score:
                         max_score = score

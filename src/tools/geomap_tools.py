@@ -1,6 +1,7 @@
 from shapely.geometry import Point, Polygon
 import numpy as np
 from scipy.spatial.distance import pdist, squareform
+from sklearn.metrics.pairwise import haversine_distances
 
 def point_inside_polygon(point, polygon):
     
@@ -22,9 +23,10 @@ def scale_polygon(polygon, point, factor):
         
     return np.array(scaled_polygon)
 
-def haversine_cdist(point1, point2):
-    lon1, lat1 = point1
-    lon2, lat2 = point2
+def haversine_dist(point1, point2):
+    lat1, lon1 = point1
+    lat2, lon2 = point2
+
     return haversine(lat1, lon1, lat2, lon2)
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -45,7 +47,9 @@ def haversine(lat1, lon1, lat2, lon2):
 
 def merge_close_points(points, R):
     # Calculate the pairwise distances between all points
-    distances_points = squareform(pdist(points))
+    # distances_points = squareform(pdist(points, metric=haversine_dist))
+    earth_radius = 6371
+    distances_points = haversine_distances(np.radians(points)) * earth_radius
 
     # Initialize a list to hold the new points
     new_points = []
