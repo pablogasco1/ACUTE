@@ -26,7 +26,7 @@ class FlightClusterApp:
         self.grouped_df = pd.DataFrame()
     
     def cluster_dataframe(self) -> pd.DataFrame:
-        # Group by 'cluster' and calculate the necessary statistics
+        # Group by 'cluster' and calculate the necessary statistics 
         cluster_df = self.df_alt_filter.groupby('cluster').agg({
             'altitude': ['count', 'max', 'std', 'mean'],
             'distance': ['max', 'std', 'mean'],
