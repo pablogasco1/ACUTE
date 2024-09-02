@@ -101,12 +101,10 @@ class FlightClusterApp:
             place_result = gmaps.places_nearby(location=(polygon.centroid.y, polygon.centroid.x), radius=max_radius*1000, keyword='point of interest', language='en')
             maps_places_list = place_result["results"]
             while "next_page_token" in place_result.keys():
-                print("HIIIIIIIIIIIIIIIIIIIII")
                 time.sleep(2)
                 place_result = gmaps.places(page_token=place_result['next_page_token'])
                 maps_places_list += place_result["results"]
             
-            print("Place Maps length", len(maps_places_list))
             #maps_places_list = place_result["results"] + place_result2["results"]
             df_points_interest = pd.DataFrame()
             df_points_interest['latitude'] = [i["geometry"]["location"]["lat"] for i in maps_places_list]
@@ -221,10 +219,25 @@ class FlightClusterApp:
         st.text(f"Silhouette Avg: {silhouette_avg}")
         st.text(f"Clustered Points Ratio: {np.round(clustered_ratio, 3)}")
         
-        fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='cluster', size="altitude",
-                                color_continuous_scale=px.colors.diverging.Portland ,#px.colors.cyclical.HSV,
-                                zoom=10, height=1000, width=1500,
-                                title='Drone Detected Position',)
+        color_scale = [
+            [0, 'red'],    # Smallest values
+            [0.5, 'yellow'], # Middle values
+            [1, 'green']   # Largest values
+        ]
+        
+        if "distance_slant_m" in df_cluster:
+            fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='distance_slant_m', size="altitude", #color="cluster"
+                                    #color_continuous_scale=px.colors.diverging.Portland ,  
+                                    color_continuous_scale=color_scale,
+                                    #px.colors.cyclical.HSV,
+                                    zoom=10, height=1000, width=1500,
+                                    title='Drone Detected Position',)
+        else:
+            fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', size="altitude", color="cluster",
+                        color_continuous_scale=px.colors.diverging.Portland ,  
+                        #px.colors.cyclical.HSV,
+                        zoom=10, height=1000, width=1500,
+                        title='Drone Detected Position',)
         
         # Now, the text with the number of the cluster is placed in the centroid of the cluster.
         centroids_list = list()
@@ -426,24 +439,40 @@ class FlightClusterApp:
         else:
             self.df.rename(columns={"drone_latitude" : "latitude", "drone_longitude" : "longitude"}, inplace=True)
 
-        print(self.df.columns)
         if self.reduce_jrny:
             #mean_max = st.radio("Max or Mean:", ["Max", "Mean"], help=info_help.max_mean_help) 
             mean_max = "max"
             
+            agg_dict = {
+                "latitude": ("latitude", "mean"),
+                "longitude": ("longitude", "mean"),
+                "journey": ("journey", "first"),
+                "ident": ("ident", "first"),
+                "model": ("model", "first"),
+                "timestamp": ("timestamp", "first"),
+                "altitude" : ("altitude", mean_max.lower()),
+            }
+            
+            if "distance" in self.df.columns:
+                agg_dict["distance"] = ("distance", mean_max.lower())
+            if "distance_slant_m" in self.df.columns:
+                agg_dict["distance_slant_m"] = ("distance_slant_m", "min") # interesed in possible risks when they are very close
+            
             grouped_df = pd.DataFrame()
             if not self.df.empty:
-                grouped_df = self.df.groupby("journey").agg(
-                    latitude=("latitude", "mean"),
-                    longitude=("longitude", "mean"),
-                    altitude=("altitude", mean_max.lower()),
-                    distance=("distance", mean_max.lower()),
-                    journey=("journey", "first"),
-                    ident = ("ident", "first"),
-                    model = ("model", "first"),
-                    timestamp = ("timestamp", "first"),
-                    )
-            
+                grouped_df = self.df.groupby("journey").agg(**agg_dict)
+                
+                # grouped_df = self.df.groupby("journey").agg(
+                #     latitude=("latitude", "mean"),
+                #     longitude=("longitude", "mean"),
+                #     altitude=("altitude", mean_max.lower()),
+                #     distance=("distance", mean_max.lower()),
+                #     distance_slant_m=("distance_slant_m", "min"), 
+                #     journey=("journey", "first"),
+                #     ident = ("ident", "first"),
+                #     model = ("model", "first"),
+                #     timestamp = ("timestamp", "first"),
+                #     )
             self.df_plot = grouped_df.copy()
         else:
             self.df_plot = self.df.copy()
@@ -486,31 +515,33 @@ class FlightClusterApp:
         # Filter 1 based on the user selection
         time_mask = (self.df['timestamp'] > start_time) & (self.df['timestamp'] <= end_time) & (self.df["station_name"] == selected_station)
         self.df = self.df[time_mask]
-        
+    
         # Rename
         self.df.rename(columns={"latitude": "drone_latitude", "longitude": "drone_longitude"}, inplace=True)
         
-        # Filter to remove those points further than radius km from the station
-        self.df['station_horiz_distance'] = haversine(self.df['station_latitude'], self.df['station_longitude'], self.df['drone_latitude'], self.df['drone_longitude'])
-        
-        # Radius limit
-        radius = 100  # kilometers
-
-        # Filter the DataFrame to only include rows where the distance is less than or equal to the radius
-        self.df = self.df[self.df['station_horiz_distance'] <= radius]
+        if "station_latitude" in self.df:
+            # Filter to remove those points further than radius km from the station
+            self.df['station_horiz_distance'] = haversine(self.df['station_latitude'], self.df['station_longitude'], self.df['drone_latitude'], self.df['drone_longitude'])
+            
+            # Filter the DataFrame to only include rows where the distance is less than or equal to the radius
+            radius = 100  # kilometers
+            self.df = self.df[self.df['station_horiz_distance'] <= radius]
         
         # Haversine distance gives the 2d distance, so the elevation is added to obtain the 3d distance
-        self.df['distance'] = self.df.apply(
-            lambda df: np.sqrt(
-                (haversine(
-                    df['drone_latitude'], 
-                    df['drone_longitude'], 
-                    df['home_lat'], 
-                    df['home_lon']
-                )**2) + df['elevation']**2
-            ), 
-            axis=1
-        )
+        if "distance_home_m" in self.df:
+            self.df["distance"] = self.df["distance_home_m"]
+        else:
+            self.df['distance'] = self.df.apply(
+                lambda df: np.sqrt(
+                    (haversine(
+                        df['drone_latitude'], 
+                        df['drone_longitude'], 
+                        df['home_lat'], 
+                        df['home_lon']
+                    )**2) + df['elevation']**2
+                ), 
+                axis=1
+            )
         
     def get_score(self, df : pd.DataFrame, fun) -> float:
         
