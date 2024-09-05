@@ -222,11 +222,11 @@ class FlightClusterApp:
         color_scale = [
             [0, 'red'],    # Smallest values
             [0.5, 'yellow'], # Middle values
-            [1, 'green']   # Largest values
+            [1, 'white']   # Largest values
         ]
         
         if "distance_slant_m" in df_cluster:
-            fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='distance_slant_m', size="altitude", #color="cluster"
+            fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='distance_slant_m', size="encounters", #color="cluster"
                                     #color_continuous_scale=px.colors.diverging.Portland ,  
                                     color_continuous_scale=color_scale,
                                     #px.colors.cyclical.HSV,
@@ -288,7 +288,7 @@ class FlightClusterApp:
             lat=self.df_points_interest['latitude'],
             lon=self.df_points_interest['longitude'],
             mode='markers',  # Include text labels
-            marker=dict(size=10, color='white'),
+            marker=dict(size=10, color='green'),
             name="",
         ))
         
@@ -388,7 +388,7 @@ class FlightClusterApp:
     def display_ui(self):
         print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         
-        self.uploaded_files = st.file_uploader("Choose Parquet files", type="parquet", accept_multiple_files=True)
+        self.uploaded_files = st.file_uploader("Choose Parquet files", type=["parquet", "csv"], accept_multiple_files=True)
         if self.uploaded_files:
             self.upload_and_process_data()
         
@@ -453,6 +453,8 @@ class FlightClusterApp:
                 "altitude" : ("altitude", mean_max.lower()),
             }
             
+            if "encounters" in self.df.columns:
+                agg_dict["encounters"] = ("encounters", "max")
             if "distance" in self.df.columns:
                 agg_dict["distance"] = ("distance", mean_max.lower())
             if "distance_slant_m" in self.df.columns:
@@ -482,7 +484,10 @@ class FlightClusterApp:
         dfs = []
         for uploaded_file in self.uploaded_files:
             # Read each parquet file into a DataFrame
-            df_i = pd.read_parquet(uploaded_file)
+            if uploaded_file.name.endswith('.csv'):
+                df_i = pd.read_csv(uploaded_file)
+            elif uploaded_file.name.endswith('.parquet'):
+                df_i = pd.read_parquet(uploaded_file)
             dfs.append(df_i)
 
         if dfs:
@@ -493,6 +498,16 @@ class FlightClusterApp:
 
     def process_data(self):
         print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
+        
+        if "distance_slant_m" in self.df:
+            self.df.rename(columns={"drone_lat" : "latitude", 
+                                    "drone_lon" : "longitude", 
+                                    "drone_height_m" : "altitude", 
+                                    "time" : "timestamp", 
+                                    "drone_id" : "ident", 
+                                    "site" : "station_name"}, 
+                           inplace=True)
+            self.df['encounters'] = self.df['en_id'].str.split('-').str[-1].astype(int)
         # Create date and time selectors
         start_time = st.date_input('Start date', value=pd.to_datetime('2023-06-21'))
         end_time =   st.date_input('End date',   value=pd.to_datetime('2025-12-31'))
