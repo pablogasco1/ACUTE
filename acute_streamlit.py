@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from shapely.geometry import Polygon
 import osmnx as ox
-from sklearn.cluster import DBSCAN, HDBSCAN    
+from sklearn.cluster import DBSCAN, HDBSCAN, OPTICS   
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
@@ -13,10 +13,12 @@ from scipy.spatial.distance import cdist
 from io import BytesIO
 import googlemaps
 import time
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, silhouette_samples
 import src.features.info_help as info_help
 from src.tools.geomap_tools import haversine, haversine_dist, scale_polygon, point_inside_polygon, merge_close_points
 import inspect
+# from DBCV import DBCV
+import dbcv
 
 class FlightClusterApp:
     def __init__(self):
@@ -116,14 +118,10 @@ class FlightClusterApp:
                 try:
                     class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"], which_result=1)[["class", "type"]].values[0]
                 except: #ox._errors.InsufficientResponseError:
-                    if len(i["name"].split("-"))>1:
-                        try:
-                            class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"].split("-")[0], which_result=1)[["class", "type"]].values[0]
-                        except: #ox._errors.InsufficientResponseError:
-                            try:
-                                class_i, type_i = ox.geocoder.geocode_to_gdf(i["name"].split("-")[1], which_result=1)[["class", "type"]].values[0]
-                            except: #ox._errors.InsufficientResponseError:
-                                pass
+                    coordinates_str = str(i["geometry"]["location"]["lat"]) + ", " + str(i["geometry"]["location"]["lng"])
+                    ox_response = ox.geocoder.geocode_to_gdf(coordinates_str, which_result=1)
+                    class_i, type_i = ox_response[["class", "type"]].values[0]
+                    
                 df_points_interest.loc[ind, "class"] = class_i
                 df_points_interest.loc[ind, "type"] = type_i 
                 if class_i not in self.tags_dict:
@@ -189,10 +187,11 @@ class FlightClusterApp:
         
         km_per_radian = 6371.0088
         if self.algorithm=="DBSCAN":
-            
             dbscan = DBSCAN(eps=eps/km_per_radian, min_samples=min_samples, metric="haversine")
+        elif self.algorithm=="OPTICS":
+            dbscan = OPTICS(max_eps=eps/km_per_radian, min_samples=min_samples, min_cluster_size=max(5, min_samples), metric="haversine")
         elif self.algorithm=="HDBSCAN":
-            dbscan = HDBSCAN(cluster_selection_epsilon=eps/km_per_radian, min_samples=min_samples, metric="haversine")
+            dbscan = HDBSCAN(cluster_selection_epsilon=eps/km_per_radian, min_samples=min_samples, min_cluster_size=max(5, min_samples), metric="haversine")
             
         # Fit the model to the data
         dbscan.fit(np.radians(df[['latitude', 'longitude']]))
@@ -206,16 +205,21 @@ class FlightClusterApp:
         # Plot the drones points
         df_no_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] == -1]
         df_cluster = self.df_alt_filter[self.df_alt_filter["cluster"] != -1]
+        df_cluster = df_cluster.drop_duplicates(subset=["latitude", "longitude", "cluster"]) # if not dbcv raises and error, but is this correct?
         
         # Calculate pairwise distances
         distance_matrix = haversine_distances(np.radians(df_cluster[['latitude', 'longitude']]))
 
         # Use precomputed distance matrix instead of directly using coordinates
         silhouette_avg = silhouette_score(distance_matrix, df_cluster["cluster"], metric='precomputed')
-        #silhouette_avg = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
+ 
+        dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
+        #dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']], df_cluster["cluster"].values, metric=haversine_dist)
+
 
         clustered_ratio = len(df_cluster) / len(self.df_alt_filter)
         
+        st.text(f"DBCV Score: {dbcv_score}")
         st.text(f"Silhouette Avg: {silhouette_avg}")
         st.text(f"Clustered Points Ratio: {np.round(clustered_ratio, 3)}")
         
@@ -261,8 +265,8 @@ class FlightClusterApp:
                     lat=df_no_cluster['latitude'],
                     lon=df_no_cluster['longitude'],
                     mode='markers',  # Include text labels
-                    marker=dict(size=5, color='black'),
-                    name="",
+                    marker=dict(size=5, color='yellow'),
+                    name="Non-cluster points",
                 ))
         # I dont like this, since if the cluster is too big, the points could not be displayed even being inside the cluster
         # Change it, so it just plots points inside a cluster
@@ -280,7 +284,7 @@ class FlightClusterApp:
             mode='text',  # Include text labels
             text=[str(i) for i in centroids_df["cluster"].values],
             textfont=dict(size=26, color='white'),
-            name="",
+            name="Cluster Number",
         ))
         
         #Scatter points of interest
@@ -289,7 +293,7 @@ class FlightClusterApp:
             lon=self.df_points_interest['longitude'],
             mode='markers',  # Include text labels
             marker=dict(size=10, color='green'),
-            name="",
+            name="Points of interest",
         ))
         
         fig.update_layout(
@@ -349,6 +353,17 @@ class FlightClusterApp:
         cluster_df = self.cluster_dataframe()
         st.write(cluster_df)
         
+        with BytesIO() as output:
+            writer = pd.ExcelWriter(output, engine='xlsxwriter')
+            cluster_df.to_excel(writer, sheet_name='Data', index=False)
+            writer.close()
+            st.download_button(
+                label="Download Excel workbook",
+                data=output.getvalue(),
+                file_name="workbook2.xlsx",
+                mime="application/vnd.ms-excel"
+            )
+        
         self.save_table()
             
         st.plotly_chart(fig)
@@ -385,6 +400,17 @@ class FlightClusterApp:
                     mime="application/vnd.ms-excel"
                 )
 
+    def installations_table(self):
+        antennas = pd.read_csv("data/external/antennas.csv")
+        installations = pd.read_csv("data/external/installations.csv")
+        sites = pd.read_csv("data/external/sites.csv")
+        antennas.rename(columns={"id" : "antenna_id", "name" : "antenna_name"}, inplace=True)
+        sites.rename(columns={"id" : "site_id", "name" : "site_abrev_name", "basename" : "site_name", "code" : "site_code"}, inplace=True)
+        installation_merge = pd.merge(installations, antennas, on="antenna_id", how="left")
+        self.installation_df = pd.merge(installation_merge, sites, on="site_id", how="left").set_index("id")  
+        self.installation_df.start_at = pd.to_datetime(self.installation_df.start_at)
+        self.installation_df.end_at = pd.to_datetime(self.installation_df.end_at)
+
     def display_ui(self):
         print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         
@@ -397,23 +423,25 @@ class FlightClusterApp:
         )
         
         if self.api=="OSMNX":
-            self.R = st.slider('Centroid Radius', min_value=0.0, max_value=1.0, value=0.5, step=0.02, format="%f", 
-                  help=info_help.centroid_radius_help)
+            # self.R = st.slider('Centroid Radius', min_value=0.0, max_value=1.0, value=0.5, step=0.02, format="%f", 
+            #       help=info_help.centroid_radius_help)
+            self.R = 0.5
         
-        self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "POI"], 
-                            help = info_help.algorithm_help)
+        self.algorithm = st.radio("Cluster Algorithm:", ["DBSCAN", "HDBSCAN", "OPTICS"], 
+                           help = info_help.algorithm_help)
+        #self.algorithm = "DBSCAN"
             
-        self.altitude_limit = st.slider('Altitude Limit', min_value=0, max_value=500, value=0, step=10,
-                           help=info_help.altitude_limit_help)
+        self.altitude_limit = st.slider('Altitude Limit', min_value=0, max_value=500, value=5, step=5,
+                            help=info_help.altitude_limit_help)
 
         if self.algorithm=="POI":
             self.X = st.slider('Min Distance', min_value=0.001, max_value=0.1, value=0.05, step=0.001, format="%f",
                         help=info_help.min_dist_help)
         else:
-            self.eps = st.slider('Max Distance', min_value=0.05, max_value=1.0, value=0.4, step=0.05, format="%f",
+            self.eps = st.slider('Max Distance', min_value=0.1, max_value=0.5, value=0.4, step=0.05, format="%f",
                             help=info_help.max_dist_help)
 
-        self.min_samples = st.slider('Min Samples', min_value=5, max_value=25, value=7,
+        self.min_samples = st.slider('Min Samples', min_value=3, max_value=12, value=7,
                         help=info_help.min_sample_help)
 
         if self.api=="OSMNX":
@@ -427,11 +455,12 @@ class FlightClusterApp:
 
         self.analyze_pilots = st.checkbox('Pilot Analysis', value=False)
         
-        if self.analyze_pilots:
-            self.reduce_jrny = True
-        else:
-            self.reduce_jrny = st.checkbox('Reduce Journey', value=True, 
-                          help=info_help.reduce_jrny_help)
+        self.reduce_jrny = True
+        # if self.analyze_pilots:
+        #     self.reduce_jrny = True
+        # else:
+        #     self.reduce_jrny = st.checkbox('Reduce Journey', value=True, 
+        #                   help=info_help.reduce_jrny_help)
         
         # Analyze drones or pilots
         if self.analyze_pilots:
@@ -441,7 +470,7 @@ class FlightClusterApp:
 
         if self.reduce_jrny:
             #mean_max = st.radio("Max or Mean:", ["Max", "Mean"], help=info_help.max_mean_help) 
-            mean_max = "max"
+            #mean_max = "max"
             
             agg_dict = {
                 "latitude": ("latitude", "mean"),
@@ -450,13 +479,13 @@ class FlightClusterApp:
                 "ident": ("ident", "first"),
                 "model": ("model", "first"),
                 "timestamp": ("timestamp", "first"),
-                "altitude" : ("altitude", mean_max.lower()),
+                "altitude" : ("altitude", "max"),
             }
             
             if "encounters" in self.df.columns:
                 agg_dict["encounters"] = ("encounters", "max")
             if "distance" in self.df.columns:
-                agg_dict["distance"] = ("distance", mean_max.lower())
+                agg_dict["distance"] = ("distance", "max")
             if "distance_slant_m" in self.df.columns:
                 agg_dict["distance_slant_m"] = ("distance_slant_m", "min") # interesed in possible risks when they are very close
             
@@ -464,17 +493,6 @@ class FlightClusterApp:
             if not self.df.empty:
                 grouped_df = self.df.groupby("journey").agg(**agg_dict)
                 
-                # grouped_df = self.df.groupby("journey").agg(
-                #     latitude=("latitude", "mean"),
-                #     longitude=("longitude", "mean"),
-                #     altitude=("altitude", mean_max.lower()),
-                #     distance=("distance", mean_max.lower()),
-                #     distance_slant_m=("distance_slant_m", "min"), 
-                #     journey=("journey", "first"),
-                #     ident = ("ident", "first"),
-                #     model = ("model", "first"),
-                #     timestamp = ("timestamp", "first"),
-                #     )
             self.df_plot = grouped_df.copy()
         else:
             self.df_plot = self.df.copy()
@@ -499,36 +517,59 @@ class FlightClusterApp:
     def process_data(self):
         print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         
+        self.df.rename(columns={"station_name" : "antenna_name"}, inplace=True)
         if "distance_slant_m" in self.df:
             self.df.rename(columns={"drone_lat" : "latitude", 
                                     "drone_lon" : "longitude", 
                                     "drone_height_m" : "altitude", 
                                     "time" : "timestamp", 
                                     "drone_id" : "ident", 
-                                    "site" : "station_name"}, 
+                                    "site" : "site_abrev_name"}, 
                            inplace=True)
             self.df['encounters'] = self.df['en_id'].str.split('-').str[-1].astype(int)
-        # Create date and time selectors
-        start_time = st.date_input('Start date', value=pd.to_datetime('2023-06-21'))
-        end_time =   st.date_input('End date',   value=pd.to_datetime('2025-12-31'))
-        
-        # Convert the date objects to datetime
-        start_time = datetime.combine(start_time, datetime.min.time())
-        end_time = datetime.combine(end_time, datetime.min.time())
-
-        # Create a dropdown menu for station names
-        station_names = self.df['station_name'].unique().tolist()
-        #station_names.insert(0, station_names.pop(station_names.index("0QRDKC2R03J32P")))
-        selected_station = st.selectbox('Select a station', station_names)     
+            
         # Apply the mask
         # Convert 'timestamp' to datetime
         if self.df["timestamp"].dtype == object:
             self.df['timestamp'] = pd.to_datetime(self.df['timestamp'])
         else:
-            self.df['timestamp'] = pd.to_datetime(self.df['timestamp'], unit="s")
+            self.df['timestamp'] = pd.to_datetime(self.df['timestamp'], unit="s")    
+            
+        self.installation_df = self.installation_df[
+                                    (self.installation_df.antenna_name.isin(self.df.antenna_name.unique())) &
+                                    (self.installation_df.end_at >= self.df.timestamp.min()) &
+                                    (self.installation_df.start_at <= self.df.timestamp.max())
+                                    ]
+        
+        # Create a dropdown menu for station names
+        station_names = self.installation_df.site_abrev_name.unique().tolist()
+        #station_names.insert(0, station_names.pop(station_names.index("0QRDKC2R03J32P")))
+        selected_station = st.selectbox('Select a station', station_names)
+        
+        site_ocurrences = self.installation_df[self.installation_df.site_abrev_name==selected_station]
+        
+        num_site_ocurrences = site_ocurrences.shape[0]
+
+        if num_site_ocurrences > 1:
+            ocurrence_sel = st.selectbox(f"This site has been studied {num_site_ocurrences} times, please select one", list(range(1, num_site_ocurrences + 1)))
+        else:
+            ocurrence_sel = 1
+            
+        selected_antenna = site_ocurrences.iloc[ocurrence_sel - 1].antenna_name
+        
+        default_start_time = site_ocurrences.iloc[ocurrence_sel - 1].start_at
+        default_end_time = site_ocurrences.iloc[ocurrence_sel - 1].end_at
+        
+        # Create date and time selectors
+        start_time = st.date_input('Start date', value=pd.to_datetime(default_start_time))
+        end_time =   st.date_input('End date',   value=pd.to_datetime(default_end_time))
+        
+        # Convert the date objects to datetime
+        start_time = datetime.combine(start_time, datetime.min.time())
+        end_time = datetime.combine(end_time, datetime.min.time())
 
         # Filter 1 based on the user selection
-        time_mask = (self.df['timestamp'] > start_time) & (self.df['timestamp'] <= end_time) & (self.df["station_name"] == selected_station)
+        time_mask = (self.df['timestamp'] > start_time) & (self.df['timestamp'] <= end_time) & (self.df["antenna_name"] == selected_antenna)
         self.df = self.df[time_mask]
     
         # Rename
@@ -557,31 +598,39 @@ class FlightClusterApp:
                 ), 
                 axis=1
             )
+    
+    def get_score(self, df: pd.DataFrame, fun):
         
-    def get_score(self, df : pd.DataFrame, fun) -> float:
-        
-        def score_fun(eps : float, min_samples : int):
+        def score_fun(eps : float, min_samples : int) -> list:
             labels = fun(df, eps, min_samples)
             df["cluster"] = labels
-            n_clusters = len(df["cluster"].unique())
+            #n_clusters = len(df["cluster"][df["cluster"]>=0].unique())
             
-            if n_clusters <=2 or n_clusters > 50: 
-                return 0
+            n_clusters = df["cluster"].nunique() - 1 # we substract 1 to disregard one cluster associated to the unclustered points
             
+            if n_clusters <=1: # or n_clusters>100: 
+                return 0, 0, 0, 0, 0
+            
+            # contains unclustered points
+            df_unclstr = df.drop_duplicates(subset=["latitude", "longitude", "cluster"]).copy()
+            distance_matrix = haversine_distances(np.radians(df_unclstr[['latitude', 'longitude']]))
+            dbcv_unclstr = dbcv.dbcv(df_unclstr[['latitude', 'longitude']].values, df_unclstr["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
+            
+            # removing unclustered points
             df_cluster = df[df["cluster"] != -1]
-            clustered_ratio = len(df_cluster) / len(df)
-            
-            if clustered_ratio < 0.3 or clustered_ratio > 0.98:
-                return 0
+            cluster_ratio = len(df_cluster) / len(df)
+            df_cluster = df_cluster.drop_duplicates(subset=["latitude", "longitude", "cluster"]) # if not dbcv raises an error, but is this correct?
             
             # Calculate pairwise distances in your dataframe
-            distance_matrix = haversine_distances(df_cluster[['latitude', 'longitude']])
-
+            distance_matrix = haversine_distances(np.radians(df_cluster[['latitude', 'longitude']]))
             # Use precomputed distance matrix instead of directly using coordinates
-            sil_score = silhouette_score(distance_matrix, df_cluster["cluster"], metric='precomputed')
-            #sil_score = silhouette_score(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"])
+            silh_score = silhouette_score(distance_matrix, df_cluster["cluster"], metric='precomputed')
+
+            #dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, metric=haversine_dist)
+            dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
             
-            return sil_score * clustered_ratio
+            return n_clusters, silh_score, dbcv_score, cluster_ratio, dbcv_unclstr
+        
         return score_fun
         
     def run(self):
@@ -613,22 +662,50 @@ class FlightClusterApp:
             
             score_fun = self.get_score(self.df_alt_filter, self.plot_dbscan)
             
-            max_score = 0
-            max_score_eps = 0
-            max_score_sampl = 0
-            for sampl_i in np.arange(5, 25, 1):
-                
-                for eps_i in np.arange(0.05, 1, 0.05):
-                    score = score_fun(eps_i, sampl_i)
-                    if score > max_score:
-                        max_score = score
-                        max_score_eps = eps_i
-                        max_score_sampl = sampl_i
+            # Define a function to track the best scores dynamically
+            def track_best_scores(scores, score_values, eps_i, sampl_i, n_clusters_i, silh_score_i, dbcv_score_i, cluster_ratio_i, dbcv_unclstr_i):
+                for key, value in score_values.items():
+                    if value > scores[key]["max_value"]:
+                        scores[key]["max_value"] = value
+                        scores[key]["eps"] = eps_i
+                        scores[key]["sampl"] = sampl_i
+                        scores[key]["n_clusters"] = n_clusters_i
+                        scores[key]["silh_score"] = silh_score_i
+                        scores[key]["dbcv_score"] = dbcv_score_i
+                        scores[key]["cluster_ratio"] = cluster_ratio_i
+                        scores[key]["dbcv_unclstr"] = dbcv_unclstr_i
                         
-            st.text(f"Parameters: max_score={max_score}, eps={max_score_eps}, min_sample={max_score_sampl}")
+
+            # Initialize dictionaries to track scores
+            scores = {
+                "dbcv_unclstr": {"max_value": -1,  "eps": 0, "sampl": 0, "n_clusters": 0, "silh_score":0, "dbcv_score": 0, "cluster_ratio":0, "dbcv_unclstr": 0,},
+                "f1_silh_score": {"max_value": -1,  "eps": 0, "sampl": 0, "n_clusters": 0, "silh_score":0, "dbcv_score": 0, "cluster_ratio":0, "dbcv_unclstr": 0,},
+                "f1_dbcv_score": {"max_value": -1,  "eps": 0, "sampl": 0, "n_clusters": 0, "silh_score":0, "dbcv_score": 0, "cluster_ratio":0, "dbcv_unclstr": 0,},
+            }
+
+            # Loop through parameter ranges
+            for sampl_i in np.arange(3, 12 + 1, 1):
+                for eps_i in np.arange(0.1, 0.6, 0.1):
+                    # Get scores from the scoring function
+                    
+                    n_clusters, silh_score, dbcv_score, cluster_ratio, dbcv_unclstr = score_fun(eps_i, sampl_i)
+                    silh_score_rescale = (silh_score + 1) / 2
+                    dbcv_score_rescale = (dbcv_score + 1) / 2
+                    f1_silh_score = 2 * (silh_score_rescale * cluster_ratio) / (silh_score_rescale + cluster_ratio)
+                    f1_dbcv_score = 2 * (dbcv_score_rescale * cluster_ratio) / (dbcv_score_rescale + cluster_ratio)
+                    print(scores)
+                    # Track the best scores dynamically
+                    track_best_scores(scores, {
+                                            #"sil_score": sil_score, "cluster_ratio": cluster_ratio, 
+                                            "dbcv_unclstr": dbcv_unclstr, "f1_silh_score": f1_silh_score, "f1_dbcv_score": f1_dbcv_score}, 
+                                            eps_i, sampl_i, n_clusters, silh_score_rescale, dbcv_score_rescale, cluster_ratio, dbcv_unclstr)
+
+            test_df = pd.DataFrame.from_dict(scores)
+            st.write(test_df.T)
             
 # Main code
 if __name__ == "__main__":
     app = FlightClusterApp()
+    app.installations_table()
     app.display_ui()
     app.run()
