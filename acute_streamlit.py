@@ -357,7 +357,7 @@ class FlightClusterApp:
             writer = pd.ExcelWriter(output, engine='xlsxwriter')
             cluster_df.to_excel(writer, sheet_name='Data', index=False)
             writer.close()
-            st.download_button(
+            st.download_button2(
                 label="Download Excel workbook",
                 data=output.getvalue(),
                 file_name="workbook2.xlsx",
