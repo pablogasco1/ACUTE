@@ -349,20 +349,20 @@ class FlightClusterApp:
             st.write(count_df)
         else:
             st.text("There are no point of interest inside any cluster")
-
-        cluster_df = self.cluster_dataframe()
-        st.write(cluster_df)
-        
+            
         with BytesIO() as output:
             writer = pd.ExcelWriter(output, engine='xlsxwriter')
-            cluster_df.to_excel(writer, sheet_name='Data', index=False)
+            count_df.to_excel(writer, sheet_name='Data', index=True)
             writer.close()
-            st.download_button2(
+            st.download_button(
                 label="Download Excel workbook",
                 data=output.getvalue(),
                 file_name="workbook2.xlsx",
                 mime="application/vnd.ms-excel"
             )
+
+        cluster_df = self.cluster_dataframe()
+        st.write(cluster_df)
         
         self.save_table()
             
