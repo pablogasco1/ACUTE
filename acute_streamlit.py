@@ -347,19 +347,29 @@ class FlightClusterApp:
             count_df["Total"] = count_df.sum(axis=1)
             count_df = count_df[count_df['Total'] != 0] # finally remove those columns which have 0 POI inside
             st.write(count_df)
+            
+            with BytesIO() as output:
+                writer = pd.ExcelWriter(output, engine='xlsxwriter')
+                count_df.to_excel(writer, sheet_name='Data', index=True)
+                writer.close()
+                st.download_button(
+                    label="Download Excel workbook",
+                    data=output.getvalue(),
+                    file_name="workbook2.xlsx",
+                    mime="application/vnd.ms-excel"
+                )
+                # #Scatter points of interest
+
         else:
             st.text("There are no point of interest inside any cluster")
-            
-        with BytesIO() as output:
-            writer = pd.ExcelWriter(output, engine='xlsxwriter')
-            count_df.to_excel(writer, sheet_name='Data', index=True)
-            writer.close()
-            st.download_button(
-                label="Download Excel workbook",
-                data=output.getvalue(),
-                file_name="workbook2.xlsx",
-                mime="application/vnd.ms-excel"
-            )
+
+        # fig.add_trace(go.Scattermapbox(
+        #     lat=df_poi_cluster['latitude'],
+        #     lon=df_poi_cluster['longitude'],
+        #     mode='markers',  # Include text labels
+        #     marker=dict(size=10, color='green'),
+        #     name=df_poi_cluster["class"] + " : " + df_poi_cluster["type"],
+        # ))
 
         cluster_df = self.cluster_dataframe()
         st.write(cluster_df)
@@ -611,12 +621,14 @@ class FlightClusterApp:
             if n_clusters <=1: # or n_clusters>100: 
                 return 0, 0, 0, 0, 0
             
-            # contains unclustered points
+            # Test DBCV procedure containing unclustered points:
+            df['latitude'] = df['latitude'].round(6)
+            df['longitude'] = df['longitude'].round(6)
             df_unclstr = df.drop_duplicates(subset=["latitude", "longitude", "cluster"]).copy()
             distance_matrix = haversine_distances(np.radians(df_unclstr[['latitude', 'longitude']]))
             dbcv_unclstr = dbcv.dbcv(df_unclstr[['latitude', 'longitude']].values, df_unclstr["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
             
-            # removing unclustered points
+            # removing unclustered points for
             df_cluster = df[df["cluster"] != -1]
             cluster_ratio = len(df_cluster) / len(df)
             df_cluster = df_cluster.drop_duplicates(subset=["latitude", "longitude", "cluster"]) # if not dbcv raises an error, but is this correct?
@@ -693,7 +705,6 @@ class FlightClusterApp:
                     dbcv_score_rescale = (dbcv_score + 1) / 2
                     f1_silh_score = 2 * (silh_score_rescale * cluster_ratio) / (silh_score_rescale + cluster_ratio)
                     f1_dbcv_score = 2 * (dbcv_score_rescale * cluster_ratio) / (dbcv_score_rescale + cluster_ratio)
-                    print(scores)
                     # Track the best scores dynamically
                     track_best_scores(scores, {
                                             #"sil_score": sil_score, "cluster_ratio": cluster_ratio, 
