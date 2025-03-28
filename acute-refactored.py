@@ -370,12 +370,12 @@ class FlightClusterApp:
         self.installation_df.end_at = pd.to_datetime(self.installation_df.end_at)
         
     def clickhouse_table(self):
-        client = clickhouse_connect.get_client(host='192.70.89.35', port=8443, username='acute', password='Odd5Dretkav@', verify=False)
+        client = clickhouse_connect.get_client(host=st.secrets["host"], port=st.secrets["port"], username=st.secrets["username"], password=st.secrets["password"], verify=False)
         database = "acute"
         query = f"""
             SELECT * 
             FROM {database}.airplane_prox 
-            WHERE toYear(time) in (2023, 2024, 2025)
+            WHERE toYear(time) in (2021, 2022, 2023, 2024, 2025)
         """
         encounters = client.query(query)
         encntrs_df = pd.DataFrame(encounters.result_rows, columns=encounters.column_names)
