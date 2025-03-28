@@ -32,3 +32,7 @@ show_uncluster_help = "Show those points that haven't been assigned to a cluster
 reduce_jrny_help = "Consider only one point per journey, this point could represent the mean or the maximum values of all the points taken in a journey"
 
 max_mean_help = "The altidude and distance from the pilot considered to create the table will be the mean or the maximum of the journey. Latitude and longitude will always be the mean"
+
+select_files_help = "Select the way of upload the files: \
+                    - BROWSER: Upload the files from your computer \
+                    - CLICKHOUSE: Upload the files from CLICKHOUSE database"
