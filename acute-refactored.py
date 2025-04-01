@@ -16,7 +16,7 @@ from sklearn.metrics import silhouette_score
 import src.features.info_help as info_help
 from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
 import inspect
-import dbcv
+from dbcv.core import dbcv
 import clickhouse_connect
 
 class FlightClusterApp:
@@ -30,7 +30,7 @@ class FlightClusterApp:
         # Group by 'cluster' and calculate the necessary statistics 
         cluster_df = self.df_alt_filter.groupby('cluster').agg({
             'altitude': ['count', 'max', 'std', 'mean'],
-            'distance_slant_m': ['max', 'std', 'mean'],
+            'distance_slant_m': ['min', 'std', 'mean'],
             'distance': ['max', 'std', 'mean'],
             'model': ["nunique", lambda x: x.value_counts().idxmax()],
             'ident': 'nunique',
@@ -181,9 +181,7 @@ class FlightClusterApp:
         # Use precomputed distance matrix instead of directly using coordinates
         silhouette_avg = silhouette_score(distance_matrix, df_cluster["cluster"], metric='precomputed')
  
-        dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
-        #dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']], df_cluster["cluster"].values, metric=haversine_dist)
-
+        dbcv_score = dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
 
         clustered_ratio = len(df_cluster) / len(self.df_alt_filter)
         
@@ -324,7 +322,7 @@ class FlightClusterApp:
             st.text("There are no point of interest inside any cluster")
 
         cluster_df = self.cluster_dataframe()
-        st.write(cluster_df)
+        st.write(cluster_df.round())
         
         self.save_table()
             
@@ -598,8 +596,7 @@ class FlightClusterApp:
             # Use precomputed distance matrix instead of directly using coordinates
             silh_score = silhouette_score(distance_matrix, df_cluster["cluster"], metric='precomputed')
 
-            #dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, metric=haversine_dist)
-            dbcv_score = dbcv.dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
+            dbcv_score = dbcv(df_cluster[['latitude', 'longitude']].values, df_cluster["cluster"].values, precomputed_matrix=distance_matrix, metric="precomputed")
             
             return n_clusters, silh_score, dbcv_score, cluster_ratio
         
