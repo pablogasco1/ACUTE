@@ -28,17 +28,33 @@ class FlightClusterApp:
     
     def cluster_dataframe(self) -> pd.DataFrame:
         # Group by 'cluster' and calculate the necessary statistics 
-        cluster_df = self.df_alt_filter.groupby('cluster').agg({
+        agg_dict = {
             'altitude': ['count', 'max', 'std', 'mean'],
-            'distance_slant_m': ['min', 'std', 'mean'],
             'distance': ['max', 'std', 'mean'],
             'model': ["nunique", lambda x: x.value_counts().idxmax()],
             'ident': 'nunique',
-            'encounters' : "sum",
-            'timestamp': lambda x: pd.to_datetime(x).dt.date.nunique()
-        })
-        
-        #print(self.df_alt_filter.columns)
+            'timestamp': [lambda x: pd.to_datetime(x).dt.date.nunique()]
+        }
+
+        # Correct conditional checks and aggregation assignments
+        if "encounters" in self.df_alt_filter.columns:
+            agg_dict["encounters"] = 'sum'  # Single aggregation can be a string
+        if "distance_slant_m" in self.df_alt_filter.columns:
+            agg_dict["distance_slant_m"] = ['min', 'std', 'mean']  # Multiple as list
+
+        cluster_df = pd.DataFrame()
+        if not self.df_alt_filter.empty:
+            cluster_df = self.df_alt_filter.groupby("cluster").agg(agg_dict)
+    
+        # cluster_df = self.df_alt_filter.groupby('cluster').agg({
+        #     'altitude': ['count', 'max', 'std', 'mean'],
+        #     'distance_slant_m': ['min', 'std', 'mean'],
+        #     'distance': ['max', 'std', 'mean'],
+        #     'model': ["nunique", lambda x: x.value_counts().idxmax()],
+        #     'ident': 'nunique',
+        #     'encounters' : "sum",
+        #     'timestamp': lambda x: pd.to_datetime(x).dt.date.nunique()
+        # })
         
         # Flatten the multi-level index created by groupby
         cluster_df.columns = [' '.join(col).strip() for col in cluster_df.columns.values]
@@ -514,7 +530,6 @@ class FlightClusterApp:
         
         # Create a dropdown menu for station names
         station_names = self.installation_df.site_abrev_name.unique().tolist()
-        #station_names.insert(0, station_names.pop(station_names.index("0QRDKC2R03J32P")))
         selected_station = st.selectbox('Select a station', station_names)
         
         site_ocurrences = self.installation_df[self.installation_df.site_abrev_name==selected_station]
@@ -545,15 +560,17 @@ class FlightClusterApp:
     
         # Rename
         self.df.rename(columns={"latitude": "drone_latitude", "longitude": "drone_longitude"}, inplace=True)
-        
-        if "station_latitude" in self.df:
-            # Filter to remove those points further than radius km from the station
-            self.df['station_horiz_distance'] = haversine(self.df['station_latitude'], self.df['station_longitude'], self.df['drone_latitude'], self.df['drone_longitude'])
             
-            # Filter the DataFrame to only include rows where the distance is less than or equal to the radius
-            radius = 100  # kilometers
-            self.df = self.df[self.df['station_horiz_distance'] <= radius]
+        # Filter to remove those points further than radius km from the station
+        self.df['station_horiz_distance'] = haversine(site_ocurrences.iloc[ocurrence_sel - 1].latitude, # antenna station latitude
+                                                      site_ocurrences.iloc[ocurrence_sel - 1].longitude, # antenna station longitude
+                                                      self.df['drone_latitude'], 
+                                                      self.df['drone_longitude'])
         
+        # Filter the DataFrame to only include rows where the distance is less than or equal to the radius
+        radius = 100  # kilometers
+        self.df = self.df[self.df['station_horiz_distance'] <= radius]
+                    
         # Haversine distance gives the 2d distance, so the elevation is added to obtain the 3d distance
         if "distance_home_m" in self.df:
             self.df["distance"] = self.df["distance_home_m"]
