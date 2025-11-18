@@ -1,23 +1,31 @@
+import googlemaps
+import time
+import inspect
+import os
+import clickhouse_connect
+
+import geopandas as gpd
 import streamlit as st
 import pandas as pd
-from shapely.geometry import Polygon
 import osmnx as ox
-from sklearn.cluster import HDBSCAN   
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import numpy as np
+import src.features.info_help as info_help
+
+from shapely.geometry import Polygon, Point
+from sklearn.cluster import HDBSCAN   
 from datetime import datetime
 from scipy.spatial import ConvexHull
 from sklearn.metrics.pairwise import haversine_distances
 from io import BytesIO
-import googlemaps
-import time
 from sklearn.metrics import silhouette_score
-import src.features.info_help as info_help
 from src.tools.geomap_tools import haversine, scale_polygon, point_inside_polygon, merge_close_points
-import inspect
+from src.tools.airspace_tools import convert_limit, classify_airspace, controlled_priority, special_priority, airspace_categories, icao_dict
 from dbcv.core import dbcv
-import clickhouse_connect
+from pyproj import CRS, Transformer
+from shapely.ops import transform
+
 
 class FlightClusterApp:
     def __init__(self):
@@ -45,16 +53,6 @@ class FlightClusterApp:
         cluster_df = pd.DataFrame()
         if not self.df_alt_filter.empty:
             cluster_df = self.df_alt_filter.groupby("cluster").agg(agg_dict)
-    
-        # cluster_df = self.df_alt_filter.groupby('cluster').agg({
-        #     'altitude': ['count', 'max', 'std', 'mean'],
-        #     'distance_slant_m': ['min', 'std', 'mean'],
-        #     'distance': ['max', 'std', 'mean'],
-        #     'model': ["nunique", lambda x: x.value_counts().idxmax()],
-        #     'ident': 'nunique',
-        #     'encounters' : "sum",
-        #     'timestamp': lambda x: pd.to_datetime(x).dt.date.nunique()
-        # })
         
         # Flatten the multi-level index created by groupby
         cluster_df.columns = [' '.join(col).strip() for col in cluster_df.columns.values]
@@ -174,7 +172,7 @@ class FlightClusterApp:
             coords = df[[lat_col, lon_col]].values
             nn = NearestNeighbors(n_neighbors=2, metric="haversine")  # Use Haversine distance
             nn.fit(np.radians(coords))  # Convert to radians for haversine calculation
-            dists, indices = nn.kneighbors(np.radians(coords), n_neighbors=2)
+            dists, _ = nn.kneighbors(np.radians(coords), n_neighbors=2)
 
             # Convert distances from radians to meters
             dists_meters = dists[:, 1] * 6371000  # Earth radius in meters
@@ -211,6 +209,7 @@ class FlightClusterApp:
             [1, 'white']   # Largest values
         ]
         
+        # to distinguish between encounters and drone positions files
         if "distance_slant_m" in df_cluster:
             fig = px.scatter_mapbox(df_cluster, lat='latitude', lon='longitude', color='distance_slant_m', size="encounters", #color="cluster"
                                     #color_continuous_scale=px.colors.diverging.Portland ,  
@@ -327,7 +326,7 @@ class FlightClusterApp:
                 count_df.to_excel(writer, sheet_name='Data', index=True)
                 writer.close()
                 st.download_button(
-                    label="Download Excel workbook",
+                    label="Download Cluster Excel workbook",
                     data=output.getvalue(),
                     file_name="workbook2.xlsx",
                     mime="application/vnd.ms-excel"
@@ -349,7 +348,9 @@ class FlightClusterApp:
             with BytesIO() as output:
                 writer = pd.ExcelWriter(output, engine='xlsxwriter')
 
-                self.df_save = pd.merge(self.df, self.df_alt_filter[["journey", "cluster"]], how="left", on="journey").fillna(-1)
+                self.df_save = pd.merge(self.df, self.df_alt_filter[["journey", "cluster", 'special_airspace_type', 
+                                                                     'airspace_type', 'intersecting_airspaces', 'icaoClass']], 
+                                        how="left", on="journey").fillna(-1)
                 self.df_save.to_excel(writer, sheet_name='Data', index=False)
 
                 parameters_dict = {"altitude_limit" : self.altitude_limit, 
@@ -366,7 +367,7 @@ class FlightClusterApp:
                 writer.close()
             
                 st.download_button(
-                    label="Download Excel workbook",
+                    label="Download Points in Excel workbook",
                     data=output.getvalue(),
                     file_name="workbook.xlsx",
                     mime="application/vnd.ms-excel"
@@ -382,14 +383,120 @@ class FlightClusterApp:
         self.installation_df = pd.merge(installation_merge, sites, on="site_id", how="left").set_index("id")  
         self.installation_df.start_at = pd.to_datetime(self.installation_df.start_at)
         self.installation_df.end_at = pd.to_datetime(self.installation_df.end_at)
+    
+    def airspace_data(self, df):
+        
+        # AIRSPACE DATA from openaip.net
+        # Folder containing the JSON files
+        folder_path = "/data/pgcasado/projects/ACUTE/data/external/"
+
+        ## List all files ending with .json
+        json_files = [f for f in os.listdir(folder_path) if f.endswith(".json")]
+
+        # Read and concatenate
+        dfs = [pd.read_json(os.path.join(folder_path, f)).dropna(axis=1) for f in json_files]
+        df_airspc = pd.concat(dfs, ignore_index=True)
+        #df = pd.read_json("/data/pgcasado/projects/ACUTE/data/external/fr_asp.json").dropna(axis=1)
+        df_airspc['coordinates'] = df_airspc['geometry'].apply(lambda x: np.array(x['coordinates'][0]))
+        df_airspc["upperLimit"] = df_airspc["upperLimit"].apply(convert_limit)
+        df_airspc["lowerLimit"] = df_airspc["lowerLimit"].apply(convert_limit)
+        
+        # Convert coordinates to Polygons
+        df_airspc["geometry"] = df_airspc["coordinates"].apply(lambda coords: Polygon(coords))
+        gdf = gpd.GeoDataFrame(df_airspc, geometry="geometry", crs="EPSG:4326")
+        
+        circle_wgs84 = self.get_spatial_circle()
+        
+        # Filter polygons that intersect with the circle
+        intersecting = gdf[gdf.intersects(circle_wgs84)]
+
+        intersecting.loc[:, "airspace_type"] = intersecting.apply(classify_airspace, axis=1)
+        
+        def classify_icaoclass(row):
+            point = Point(row["longitude"], row["latitude"])
+            altitude = row["altitude"]
+
+            # Find all intersecting airspaces in 3D
+            matches = intersecting[
+                intersecting.geometry.contains(point) &
+                (intersecting.lowerLimit <= altitude) &
+                (intersecting.upperLimit >= altitude)
+            ]
+
+            # Initialize binary flags
+            flags = {cat: "OTHER" for cat in airspace_categories}
+            max_special_priority = 0
+            max_controlled_priority = 0
+            intersecting_types = set()
+            icaoClass = 8  # Default to UNCLASSIFIED
+            
+            for _, airspace in matches.iterrows():
+                airspace_type = airspace["airspace_type"]
+
+                # Check special airspaces
+                if airspace_type in special_priority:
+                    priority = special_priority[airspace_type]
+                    if priority > max_special_priority:
+                        flags["special_airspace_type"] = airspace_type
+                        max_special_priority = priority
+                    intersecting_types.add(airspace["name"],)
+
+                # Check controlled airspaces
+                elif airspace_type in controlled_priority:
+                    priority = controlled_priority[airspace_type]
+                    if priority > max_controlled_priority:
+                        icaoClass = airspace["icaoClass"]
+                        flags["airspace_type"] = airspace_type
+                        max_controlled_priority = priority
+
+                    intersecting_types.add(airspace["name"],)
+
+            return pd.Series([
+                flags["special_airspace_type"],
+                flags["airspace_type"],
+                intersecting_types, 
+                icao_dict[icaoClass]])
+        
+        # Assign column names for output
+        col_names = airspace_categories + ["intersecting_airspaces", "icaoClass"]
+
+        # Apply to dataframe
+        df[col_names] = df.apply(classify_icaoclass, axis=1)
+        
+        return df
+        
+    def get_spatial_circle(self):
+        # Convert to a GeoSeries with appropriate projection
+        # Define WGS84 and an appropriate UTM zone (local projection)
+        wgs84 = CRS("EPSG:4326")
+        utm = CRS(proj="utm", zone=33, ellps="WGS84", south=False)  # You can use pyproj.CRS.estimate_utm_crs() for better choice
+        transformer_to_utm = Transformer.from_crs(wgs84, utm, always_xy=True)
+        transformer_to_wgs84 = Transformer.from_crs(utm, wgs84, always_xy=True)
+        radius_km = 50 # km
+        
+        #Create a circle as a buffer around the point
+        # Project the point to UTM
+        x, y = transformer_to_utm.transform(self.installation_df["longitude"], self.installation_df["latitude"])
+        point_utm = Point(x, y)
+        circle_utm = point_utm.buffer(radius_km * 1000)  # radius in meters
+        
+        # Convert circle back to WGS84 for spatial operations
+        circle_wgs84 = transform(transformer_to_wgs84.transform, circle_utm)
+        
+        return circle_wgs84
         
     def clickhouse_table(self):
         client = clickhouse_connect.get_client(host=st.secrets["host"], port=st.secrets["port"], username=st.secrets["username"], password=st.secrets["password"], verify=False)
         database = "acute"
+        # query = f"""
+        #     SELECT * 
+        #     FROM {database}.airplane_prox 
+        #     WHERE toYear(time) in (2021, 2022, 2023, 2024, 2025)
+        # """
         query = f"""
             SELECT * 
-            FROM {database}.airplane_prox 
-            WHERE toYear(time) in (2021, 2022, 2023, 2024, 2025)
+            FROM {database}.drones 
+            WHERE toYear(timestamp) in (2024, 2025)
         """
         encounters = client.query(query)
         encntrs_df = pd.DataFrame(encounters.result_rows, columns=encounters.column_names)
@@ -424,7 +531,9 @@ class FlightClusterApp:
         if self.select_files=="BROWSER":        
             self.uploaded_files = st.file_uploader("Choose Parquet files", type=["parquet", "csv"], accept_multiple_files=True)
             if self.uploaded_files:
+                
                 self.upload_and_process_data()
+                
         elif self.select_files=="CLICKHOUSE":
             self.df = self.clickhouse_table()
             
@@ -479,9 +588,9 @@ class FlightClusterApp:
         grouped_df = pd.DataFrame()
         if not self.df.empty:
             grouped_df = self.df.groupby("journey").agg(**agg_dict)
-            
+            grouped_df = self.airspace_data(grouped_df)
         self.df_plot = grouped_df.copy()
-
+        
     def upload_and_process_data(self):
         print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         dfs = []
@@ -503,7 +612,7 @@ class FlightClusterApp:
         print(f"This function {inspect.currentframe().f_code.co_name} was called by {inspect.stack()[1][3]}")
         
         self.df.rename(columns={"station_name" : "antenna_name"}, inplace=True)
-        if "distance_slant_m" in self.df:
+        if "distance_slant_m" in self.df: # this means --> if it is an encounter table
             self.df.rename(columns={"drone_lat" : "latitude", 
                                     "drone_lon" : "longitude", 
                                     "drone_alt_m" : "altitude", 
@@ -532,19 +641,21 @@ class FlightClusterApp:
         station_names = self.installation_df.site_abrev_name.unique().tolist()
         selected_station = st.selectbox('Select a station', station_names)
         
-        site_ocurrences = self.installation_df[self.installation_df.site_abrev_name==selected_station]
+        self.installation_df = self.installation_df[self.installation_df.site_abrev_name==selected_station]
         
-        num_site_ocurrences = site_ocurrences.shape[0]
+        num_site_ocurrences = self.installation_df.shape[0]
 
         if num_site_ocurrences > 1:
             ocurrence_sel = st.selectbox(f"This site has been studied {num_site_ocurrences} times, please select one", list(range(1, num_site_ocurrences + 1)))
         else:
             ocurrence_sel = 1
             
-        selected_antenna = site_ocurrences.iloc[ocurrence_sel - 1].antenna_name
+        self.installation_df = self.installation_df.iloc[ocurrence_sel-1]
+            
+        selected_antenna = self.installation_df.antenna_name
         
-        default_start_time = site_ocurrences.iloc[ocurrence_sel - 1].start_at
-        default_end_time = site_ocurrences.iloc[ocurrence_sel - 1].end_at
+        default_start_time = self.installation_df.start_at
+        default_end_time = self.installation_df.end_at
         
         # Create date and time selectors
         start_time = st.date_input('Start date', value=pd.to_datetime(default_start_time))
@@ -562,8 +673,8 @@ class FlightClusterApp:
         self.df.rename(columns={"latitude": "drone_latitude", "longitude": "drone_longitude"}, inplace=True)
             
         # Filter to remove those points further than radius km from the station
-        self.df['station_horiz_distance'] = haversine(site_ocurrences.iloc[ocurrence_sel - 1].latitude, # antenna station latitude
-                                                      site_ocurrences.iloc[ocurrence_sel - 1].longitude, # antenna station longitude
+        self.df['station_horiz_distance'] = haversine(self.installation_df.latitude, # antenna station latitude
+                                                      self.installation_df.longitude, # antenna station longitude
                                                       self.df['drone_latitude'], 
                                                       self.df['drone_longitude'])
         
